@@ -77,7 +77,7 @@ within about a third of a second:
 |---|---|
 | **Pause / Resume** | the next action blocks until Resume. While paused the page is the viewer's: they can log in, fix a form, scroll around. |
 | **Step** | lets exactly one action through, then pauses again. |
-| **Stop** | raises `FocusStopped`; the script ends cleanly. |
+| **Stop** (or **Esc Esc** on the page) | raises `FocusStopped`; the script ends cleanly. Single Esc is left to the page. |
 | **1× / 2× / 0.5×** | changes pacing live (same as `focus_speed`). |
 | **Ask me** | manual mode: every click, keystroke, typing and navigation posts a "NEXT · CLICK …" card and waits for **Approve** or **Skip**. Skip makes the wrapper return `False` without acting. Also `focus_mode("manual")` or `FOCUS_MODE=manual`. |
 | **Message box** | raises `FocusMessage` with `.messages`. |

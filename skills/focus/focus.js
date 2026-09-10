@@ -25,7 +25,7 @@
 // Pause / Step / Stop / speed / "Ask me" (approve or skip every action), and a
 // message box. Press P anywhere outside a text field to pause and enter
 // annotation mode: drag boxes over the page, type a note per box, press P
-// again to send them to the agent and resume. Esc cancels a box.
+// again to send them to the agent and resume. Esc cancels a box; Esc twice stops the agent.
 //
 // A target is a CSS selector string, an Element, or {x, y, w, h} in viewport px.
 // Animation methods return Promises (browser-harness js() awaits them).
@@ -173,7 +173,7 @@
   <div class="__fx-ctl"><button data-a="pause">Pause</button><button data-a="step">Step</button><button data-a="stop">Stop</button><button data-a="speed">1×</button><button data-a="ask">Ask me</button></div>
   <div class="__fx-log"></div>
   <div class="__fx-in"><input class="__fx-msg" placeholder="Message the agent…"><button class="__fx-primary" data-a="send">Send</button></div>
-  <div class="__fx-foot">P = pause and draw boxes for the agent · P again = send and resume</div>
+  <div class="__fx-foot">P = pause and draw boxes · P again = send and resume · Esc Esc = stop</div>
 </div>
 <div id="__fx-bubble">${CHAT_SVG}<span id="__fx-led"></span><span id="__fx-badge"></span></div>`;
     document.documentElement.appendChild(layer);
@@ -428,8 +428,15 @@
     if (el.closest && el.closest("#__fx-layer")) return !!el.closest("input,textarea");
     return el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
   }
+  let lastEsc = 0;
   function onKey(e) {
-    if (e.key === "Escape" && state.annotating) { const d = state.boxes.find((b) => !b.done); if (d) { d.el.remove(); state.boxes = state.boxes.filter((b) => b !== d); } return; }
+    if (e.key === "Escape") {
+      if (state.annotating) { const d = state.boxes.find((b) => !b.done); if (d) { d.el.remove(); state.boxes = state.boxes.filter((b) => b !== d); } return; }
+      const now = Date.now();                      // double-Esc within 600 ms = Stop (single Esc is left to the page)
+      if (now - lastEsc < 600) { state.stopped = true; push({ who: "sys", text: "Esc Esc — stopping at the next action" }); render(); lastEsc = 0; }
+      else lastEsc = now;
+      return;
+    }
     if ((e.key === "p" || e.key === "P") && !e.metaKey && !e.ctrlKey && !e.altKey && !editable(e.target)) {
       e.preventDefault(); e.stopPropagation();
       toggleAnnotate();
