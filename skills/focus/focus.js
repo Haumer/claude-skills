@@ -15,7 +15,8 @@
 //   poll()                       driver gate: consumes step/approve/choice, drains messages+annotations
 //   peek()                       non-consuming check: {stopped, paused, messages, annotations}
 //   peekAt(target, label, ms)    dashed ring on a link being read ahead (no click)
-//   fetchText(urls, chars)       fetch pages from the page's origin, return title/text/headings
+//   fetchText(urls, chars, map)  fetch pages from the page's origin, return title/text/headings (+ element map)
+//   chip(kind, label)            chip-only state (REHEARSING, MAPPING) without moving the spotlight
 //   settled(quiet, timeout)      resolves when the page DOM has been quiet for `quiet` ms
 //   exit(text) / resume()        Esc hides the overlay and stops; resume() brings it back
 //   setState(patch)              restore driver-side settings after a navigation
@@ -36,7 +37,7 @@
 // The overlay lives on <html>, not <body>, so SPA re-renders don't kill it.
 // Navigations do — focus.py re-injects on every call.
 (() => {
-  const V = 6;
+  const V = 7;
   if (window.__focus && window.__focus.__v === V) return;
   const prev = window.__focus;
 
@@ -355,7 +356,8 @@
     return r;
   }
   // Fetch pages in parallel from the page's own origin (cookies included) and reduce them to text.
-  function fetchText(urls, chars = 1500) {
+  function fetchText(urls, chars = 1500, mapSrc = null) {
+    const mapFn = mapSrc ? new Function("return (" + mapSrc + ")")() : null;
     return Promise.all(urls.map(async (u) => {
       try {
         const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 8000);
@@ -368,7 +370,8 @@
         const txt = (doc.body ? doc.body.textContent : "").replace(/\s+/g, " ").trim();
         return { url: u, status: res.status, type: ct, title: (doc.title || "").trim(), text: txt.slice(0, chars),
                  headings: [...doc.querySelectorAll("h1,h2,h3")].map((h) => h.textContent.replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 20),
-                 links: doc.querySelectorAll("a[href]").length, forms: doc.querySelectorAll("form").length };
+                 links: doc.querySelectorAll("a[href]").length, forms: doc.querySelectorAll("form").length,
+                 els: mapFn ? mapFn(doc, 60, false).els : undefined };
       } catch (e) { return { url: u, error: String(e) }; }
     }));
   }
@@ -386,6 +389,16 @@
     });
   }
   function note(text) { push({ who: "sys", text }); return true; }
+  // Chip-only state change (REHEARSING, MAPPING): the spotlight stays where it is.
+  function chip(kind, label) {
+    ensure(); touch(kind, label);
+    const c = $("__fx-chip"); if (!c) return false;
+    if (!life.anchor) { const w = innerWidth, h = innerHeight; life.anchor = { x: w * 0.5, y: h * 0.4 }; Object.assign(c.style, { left: w * 0.5 + "px", top: h * 0.4 + "px" }); $("__fx-cursor").style.transform = `translate(${w * 0.5}px,${h * 0.4}px)`; $("__fx-cursor").classList.add("__fx-on"); }
+    c.classList.remove("__fx-think");
+    c.querySelector(".__fx-kind").textContent = kind; c.querySelector(".__fx-text").textContent = label || "";
+    c.classList.add("__fx-on");
+    return true;
+  }
 
   function say(text, mood = "info") {
     ensure(); touch();
@@ -654,5 +667,5 @@
   }
   function setState(patch) { Object.assign(state, patch || {}); render(); return true; }
 
-  window.__focus = { __v: V, state, ensure, look, read, act, typing, doneTyping, survey, say, ack, clear, rect, pending, poll, peek, setState, addBox, toggleAnnotate, peekAt, fetchText, settled, note, exit, resume };
+  window.__focus = { __v: V, state, ensure, look, read, act, typing, doneTyping, survey, say, ack, clear, rect, pending, poll, peek, setState, addBox, toggleAnnotate, peekAt, fetchText, settled, note, chip, exit, resume };
 })();

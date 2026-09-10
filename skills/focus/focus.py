@@ -28,6 +28,7 @@
 
 import json as _json
 import os as _os
+import re as _re
 import time as _time
 
 FOCUS_DIR = _os.path.expanduser(_os.environ.get("FOCUS_SKILL_DIR", "~/.claude/skills/focus"))
@@ -113,12 +114,32 @@ def focus_mode(mode):
     _push_state()
 
 
+def focus_front():
+    """Bring the controlled tab to the front if it is hidden behind another one.
+
+    A hidden tab throttles timers to 1 Hz (every animation crawls) and drops synthetic
+    input, so nothing works and nobody sees it. Returns True if it had to switch."""
+    if js("document.visibilityState") != "hidden":
+        return False
+    url = js("location.href")
+    tid = next((t["targetId"] for t in cdp("Target.getTargets").get("targetInfos", [])
+                if t.get("type") == "page" and t.get("url") == url and t.get("title", "").startswith("\U0001F7E2")), None)
+    if tid:
+        cdp("Target.activateTarget", targetId=tid)
+        _time.sleep(0.15)
+    focus_install()
+    if js("!!(window.__focus && window.__focus.note)"):
+        js("window.__focus.note('brought this tab to the front — it was hidden, and a hidden tab neither animates nor takes input')")
+    return True
+
+
 def _gate(kind, label, approval=True):
     """Honour the dock: pause/step/stop/messages, and Approve/Skip in manual mode.
 
     Returns True to proceed, False if the viewer skipped this action."""
     global _SPEED
     focus_install()
+    focus_front()
     if approval:
         js(f"window.__focus.pending({_q(kind)}, {_q(label)})")
     while True:
@@ -174,7 +195,7 @@ def _target(t):
 
 def focus_install():
     """Inject the overlay engine if this document doesn't have it yet. Safe to call often."""
-    if js("!!(window.__focus && window.__focus.__v === 6)"):
+    if js("!!(window.__focus && window.__focus.__v === 7)"):
         return True
     js(_FOCUS_JS)
     _push_state()
@@ -383,34 +404,13 @@ def focus_resume():
     return True
 
 
-def _peek_tab(url, chars=1500, timeout=10.0):
-    """Read a page in a background tab (for JS-rendered pages the fetch cannot see). Closes it afterwards."""
-    tid = cdp("Target.createTarget", url=url, background=True)["targetId"]
-    sid = cdp("Target.attachToTarget", targetId=tid, flatten=True)["sessionId"]
-    ev = lambda expr: cdp("Runtime.evaluate", session_id=sid, expression=expr, returnByValue=True).get("result", {}).get("value")
-    end = _time.time() + timeout
-    while _time.time() < end and ev("document.readyState") != "complete":
-        _time.sleep(0.2)
-    _time.sleep(0.7)                                   # let a SPA paint
-    val = ev("JSON.stringify({url:location.href,title:document.title,text:(document.body?document.body.innerText:'').replace(/\\s+/g,' ').trim().slice(0,%d),"
-             "headings:[...document.querySelectorAll('h1,h2,h3')].map(h=>h.innerText.trim()).filter(Boolean).slice(0,20),"
-             "links:document.querySelectorAll('a[href]').length,forms:document.querySelectorAll('form').length})" % chars)
-    try:
-        cdp("Target.closeTarget", targetId=tid)
-    except Exception:
-        pass
-    d = _json.loads(val) if val else {"url": url, "error": "no result"}
-    d["via"] = "tab"
-    return d
-
-
 def focus_peek(targets, label="", chars=1500, mode="auto"):
     """Sneak a look at where links lead WITHOUT navigating, so the next steps can be planned in one go.
 
     targets: a selector, a URL, or a list of them. Selectors resolve to the
     link under (or around) the element. Each page is fetched from the tab's own
     origin (cookies included) and reduced to {url, status, title, text, headings,
-    links, forms}. mode "auto" falls back to a hidden background tab when the
+    links, forms, els} — els is the interactive-element map (see focus_map). mode "auto" falls back to a hidden background tab when the
     fetched HTML is thin (JS-rendered), "fetch" never does, "tab" always does.
     The viewer sees a dashed PEEKING ring on each link; nothing is clicked.
     Returns one dict for a single target, else a list (None where a target had no link)."""
@@ -430,7 +430,7 @@ def focus_peek(targets, label="", chars=1500, mode="auto"):
     live = [u for u in urls if u]
     fetched = {}
     if live and mode in ("auto", "fetch"):
-        for u, r in zip(live, js(f"window.__focus.fetchText({_q(live)}, {int(chars)})") or []):
+        for u, r in zip(live, js(f"window.__focus.fetchText({_q(live)}, {int(chars)}, {_q(_MAP_JS)})") or []):
             fetched[u] = dict(r, via="fetch")
     out = []
     for u in urls:
@@ -449,6 +449,377 @@ def focus_peek(targets, label="", chars=1500, mode="auto"):
         got = [f"{(r.get('title') or r.get('url') or '?')[:50]} ({len(r.get('text') or '')} chars)" for r in out if r]
         js(f"window.__focus.note({_q('peeked ahead: ' + '; '.join(got))})")
     return out[0] if single else out
+
+
+# --- page map: every interactive element with a stable selector, in one call ---
+_MAP_JS = r"""(root, limit, withText) => {
+  const doc = root.ownerDocument || root, win = doc.defaultView, live = !!win;
+  const esc = (x) => (win && win.CSS && win.CSS.escape) ? win.CSS.escape(x) : String(x).replace(/([^\w-])/g, "\\$1");
+  const vis = (e) => { if (!live) return true; const r = e.getBoundingClientRect(); if (r.width < 2 || r.height < 2) return false;
+    const st = win.getComputedStyle(e); return st.visibility !== "hidden" && st.display !== "none" && st.opacity !== "0"; };
+  const attr = (e, a) => e.getAttribute(a) || "";
+  const txt = (e) => { const t = (live && e.innerText != null ? e.innerText : e.textContent) || "";
+    const alt = attr(e, "aria-label") || attr(e, "title") || attr(e, "placeholder") || attr(e, "alt") || ((e.querySelector && e.querySelector("img[alt]")) || {}).alt || "";
+    return (t.trim() || alt).replace(/\s+/g, " ").trim().slice(0, 80); };
+  const uniq = (sel, scope) => { try { return scope.querySelectorAll(sel).length === 1; } catch (_) { return false; } };
+  const selFor = (e, scope) => {
+    if (e.id && uniq("#" + esc(e.id), scope)) return "#" + esc(e.id);
+    for (const a of ["data-testid", "data-test", "data-qa", "name", "aria-label", "placeholder", "href", "title", "value"]) {
+      const v = attr(e, a); if (!v || v.length > 80) continue;
+      const sel = e.tagName.toLowerCase() + "[" + a + "=" + JSON.stringify(v) + "]"; if (uniq(sel, scope)) return sel;
+    }
+    const parts = []; let cur = e;
+    while (cur && cur.nodeType === 1 && cur !== scope && parts.length < 7) {
+      if (cur.id && uniq("#" + esc(cur.id), scope)) { parts.unshift("#" + esc(cur.id)); break; }
+      const tag = cur.tagName.toLowerCase(), sibs = [...cur.parentNode.children].filter((c) => c.tagName === cur.tagName);
+      parts.unshift(sibs.length > 1 ? tag + ":nth-of-type(" + (sibs.indexOf(cur) + 1) + ")" : tag);
+      cur = cur.parentNode;
+    }
+    const sel = parts.join(" > "); return uniq(sel, scope) ? sel : null;
+  };
+  const Q = "a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],[role=menuitem],[role=option],[role=checkbox],[role=radio],[role=combobox],[contenteditable=true],[onclick]";
+  const els = [], seen = new Set();
+  const walk = (scope, shadow) => {
+    for (const e of scope.querySelectorAll(Q)) {
+      if (els.length >= limit) return;
+      if (!vis(e) || (e.closest && e.closest("#__fx-layer"))) continue;
+      const tag = e.tagName.toLowerCase(), t = txt(e), href = attr(e, "href");
+      const key = tag + "|" + t + "|" + href;
+      if (seen.has(key) && !/^(input|select|textarea)$/.test(tag)) continue; seen.add(key);
+      const o = { i: els.length, tag, text: t };
+      const role = attr(e, "role"); if (role) o.role = role;
+      if (tag === "input") o.type = e.type || "text";
+      if (e.name) o.name = e.name;
+      if (href) o.href = live ? (e.href || href) : href;
+      if (e.disabled) o.disabled = true;
+      if (/^(input|textarea|select)$/.test(tag) && e.value) o.value = String(e.value).slice(0, 60);
+      if (tag === "select") o.options = [...e.options].map((x) => x.text.trim()).slice(0, 12);
+      if (live) { const r = e.getBoundingClientRect(); o.rect = [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)]; }
+      if (shadow) o.shadow = true; else { const sel = selFor(e, doc); if (sel) o.sel = sel; }
+      els.push(o);
+    }
+    for (const h of scope.querySelectorAll("*")) { if (els.length >= limit) return; if (h.shadowRoot) walk(h.shadowRoot, true); }
+  };
+  walk(doc, false);
+  const headings = [...doc.querySelectorAll("h1,h2,h3")].filter(vis).map((h) => ((live ? h.innerText : h.textContent) || "").replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 20);
+  const out = { url: live ? win.location.href : "", title: (doc.title || "").trim(), headings, els, count: els.length };
+  if (withText) out.text = ((doc.body && (live ? doc.body.innerText : doc.body.textContent)) || "").replace(/\s+/g, " ").trim().slice(0, withText === true ? 600 : withText);
+  return out;
+}"""
+
+# Mutation clock for a tab without the overlay: installed once per document, polled from Python
+# (timers in a hidden tab are throttled to 1 Hz, so the polling has to live on this side).
+_MUT_JS = ("(()=>{if(!window.__fxmo){window.__fxLast=Date.now();window.__fxmo=new MutationObserver(()=>{window.__fxLast=Date.now()});"
+           "window.__fxmo.observe(document.documentElement,{childList:true,subtree:true,characterData:true});return 0}return Date.now()-window.__fxLast})()")
+
+
+def focus_map(limit=60, chars=600):
+    """One call instead of a screenshot and five probes: {url, title, headings, text, els, count}.
+
+    els: visible interactive elements in page order — {i, tag, text, sel, rect, href?, type?,
+    name?, value?, options?, role?, disabled?, shadow?}. `sel` is a selector verified unique
+    in the document; elements inside shadow roots have no sel (use rect with focus_click_at).
+    Print it with focus_brief(m)."""
+    focus_install()
+    js(f"window.__focus.chip('MAPPING', 'reading every clickable thing on this page')")
+    m = _json.loads(js(f"JSON.stringify(({_MAP_JS})(document, {int(limit)}, {int(chars)}))"))
+    js(f"window.__focus.note({_q('mapped %d interactive elements' % m['count'])})")
+    return m
+
+
+def focus_brief(m, n=None):
+    """Compact text of a map (or a peek/run result carrying one): one line per element."""
+    if m is None:
+        return "(no map)"
+    if "els" not in m and isinstance(m.get("map"), dict):
+        m = m["map"]
+    lines = [f"{m.get('title') or '?'}  |  {m.get('url') or ''}"]
+    if m.get("headings"):
+        lines.append("headings: " + " / ".join(m["headings"][:8]))
+    if m.get("text"):
+        lines.append("text: " + m["text"][:300])
+    for e in (m.get("els") or [])[: n or 999]:
+        bits = [f"[{e['i']}]", e["tag"] + (f"[{e['type']}]" if e.get("type") else "") + (f"({e['role']})" if e.get("role") else "")]
+        if e.get("text"):
+            bits.append(_json.dumps(e["text"][:50], ensure_ascii=False))
+        if e.get("value"):
+            bits.append("value=" + _json.dumps(e["value"][:30], ensure_ascii=False))
+        if e.get("options"):
+            bits.append("options=" + "|".join(e["options"][:6]))
+        if e.get("href"):
+            bits.append(e["href"][:70])
+        bits.append("sel=" + e["sel"] if e.get("sel") else ("shadow @" + str(e.get("rect")) if e.get("shadow") else "@" + str(e.get("rect"))))
+        if e.get("disabled"):
+            bits.append("(disabled)")
+        lines.append(" ".join(bits))
+    return "\n".join(lines)
+
+
+# --- hidden tab: same cookies as the visible one, driven at DOM level ---
+class _Shadow:
+    """A background tab the viewer never sees. It shares the browser's session, so a logged-in
+    journey rehearses as logged in. The tab never gets focus, so real Input events are dropped;
+    clicks, typing and keys are performed at DOM level instead (el.click(), the native value
+    setter plus input/change events, KeyboardEvents plus form.requestSubmit for Enter)."""
+
+    def __init__(self, url, timeout=10.0):
+        self.tid = cdp("Target.createTarget", url=url, background=True)["targetId"]
+        self.sid = cdp("Target.attachToTarget", targetId=self.tid, flatten=True)["sessionId"]
+        self.wait_loaded(timeout)
+
+    def ev(self, expr, await_=False):
+        r = cdp("Runtime.evaluate", session_id=self.sid, expression=expr, returnByValue=True, awaitPromise=await_)
+        if "exceptionDetails" in r:
+            d = r["exceptionDetails"]
+            raise RuntimeError((d.get("exception") or {}).get("description") or d.get("text") or "js error")
+        return r.get("result", {}).get("value")
+
+    def wait_loaded(self, timeout=10.0):
+        end = _time.time() + timeout
+        while _time.time() < end:
+            try:
+                if self.ev("location.href") != "about:blank" and self.ev("document.readyState") == "complete":
+                    break
+            except Exception:
+                pass
+            _time.sleep(0.1)
+        return self.settled()
+
+    def settled(self, quiet=0.3, timeout=6.0):
+        end = _time.time() + timeout
+        while _time.time() < end:
+            try:
+                if self.ev(_MUT_JS) >= quiet * 1000:
+                    return True
+            except Exception:
+                pass
+            _time.sleep(0.1)
+        return False
+
+    def wait_for(self, expr, timeout=6.0):
+        end = _time.time() + timeout
+        while True:
+            try:
+                if self.ev(expr):
+                    return True
+            except Exception:
+                pass
+            if _time.time() >= end:
+                return False
+            _time.sleep(0.1)
+
+    def map(self, limit=60, chars=600):
+        return _json.loads(self.ev(f"JSON.stringify(({_MAP_JS})(document, {int(limit)}, {int(chars)}))"))
+
+    def do(self, st):
+        k, t = st["kind"], st.get("target")
+        if k == "goto":
+            cdp("Page.navigate", session_id=self.sid, url=t); self.wait_loaded(); return True
+        if k == "click":
+            ok = self.ev(f"(e=>{{if(!e)return false;e.scrollIntoView({{block:'center'}});e.click();return true}})(document.querySelector({_q(t)}))")
+            if not ok:
+                return False
+            _time.sleep(0.15); self.wait_loaded(); return True
+        if k == "type":
+            ok = self.ev(f"""(e=>{{if(!e)return false;e.focus();const p=e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
+                const d=Object.getOwnPropertyDescriptor(p,'value');if(d&&d.set)d.set.call(e,{_q(st['text'])});else e.value={_q(st['text'])};
+                e.dispatchEvent(new Event('input',{{bubbles:true}}));e.dispatchEvent(new Event('change',{{bubbles:true}}));return true}})(document.querySelector({_q(t)}))""")
+            if ok:
+                self.settled()
+            return bool(ok)
+        if k == "press":
+            key = st["key"]; code = {"Enter": 13, "Escape": 27, "Tab": 9, "ArrowDown": 40, "ArrowUp": 38, "Backspace": 8}.get(key, 0)
+            self.ev(f"""(()=>{{const e=document.activeElement||document.body;const o={{key:{_q(key)},code:{_q(key)},keyCode:{code},which:{code},bubbles:true,cancelable:true}};
+                const ok=e.dispatchEvent(new KeyboardEvent('keydown',o));e.dispatchEvent(new KeyboardEvent('keypress',o));e.dispatchEvent(new KeyboardEvent('keyup',o));
+                const f=e.form||(e.closest&&e.closest('form'));if(ok&&{_q(key)}==='Enter'&&f){{if(f.requestSubmit)f.requestSubmit();else f.submit()}}}})()""")
+            _time.sleep(0.15); self.wait_loaded(); return True
+        if k == "wait":
+            return self.wait_for(_expect_expr(t), st.get("timeout", 6.0))
+        if k == "read":
+            st["_text"] = self.ev(f"(e=>e?e.innerText:null)(document.querySelector({_q(t)}))")
+            return st["_text"] is not None
+        if k == "scroll":
+            self.ev(f"scrollBy(0,{int(st.get('dy', 400))})"); self.settled(); return True
+        return True                                  # say / unknown: nothing to rehearse
+
+    def close(self):
+        try:
+            cdp("Target.closeTarget", targetId=self.tid)
+        except Exception:
+            pass
+
+
+def _peek_tab(url, chars=1500, timeout=10.0):
+    """Read a page in a hidden tab (for JS-rendered pages the fetch cannot see). Closes it afterwards."""
+    sh = _Shadow(url, timeout)
+    try:
+        m = sh.map(60, chars)
+    finally:
+        sh.close()
+    m["links"] = len([e for e in m["els"] if e.get("href")])
+    m["via"] = "tab"
+    return m
+
+
+# --- run a plan: rehearse it in the hidden tab, then perform it visibly, in one script ---
+def _norm_step(s):
+    """('click', sel, label) / ('type', sel, text, label) / ('press', key, label) / ('goto', url, label)
+    / ('wait', cond) / ('read', sel, label) / ('scroll', dy) / ('say', text) — or the same as dicts.
+    Any form may carry expect= (selector, 'js:', 'text:', 'url:') and timeout=."""
+    if isinstance(s, dict):
+        d = dict(s)
+    else:
+        k, rest = s[0], list(s[1:])
+        d = {"kind": k}
+        if k == "type":
+            d["target"], d["text"] = rest[0], rest[1]; d["label"] = rest[2] if len(rest) > 2 else ""
+        elif k == "press":
+            d["key"] = rest[0]; d["label"] = rest[1] if len(rest) > 1 else ""
+        elif k == "say":
+            d["text"] = rest[0]; d["mood"] = rest[1] if len(rest) > 1 else "info"
+        elif k == "scroll":
+            d["dy"] = rest[0] if rest else 400; d["label"] = rest[1] if len(rest) > 1 else ""
+        else:
+            d["target"] = rest[0]; d["label"] = rest[1] if len(rest) > 1 else ""
+    d.setdefault("label", "")
+    return d
+
+
+def _expect_expr(x):
+    """selector | 'js:<expr>' | 'text:<substring>' | 'url:<substring>' -> JS expression."""
+    if x.startswith("js:"):
+        return x[3:]
+    if x.startswith("text:"):
+        return f"(document.body.innerText||'').includes({_q(x[5:])})"
+    if x.startswith("url:"):
+        return f"location.href.includes({_q(x[4:])})"
+    return f"(e=>!!(e&&(e.offsetParent||e.getClientRects().length)))(document.querySelector({_q(x)}))"
+
+
+def _step_name(st):
+    k = st["kind"]
+    return {"type": f"type {st.get('text', '')[:30]!r} into {st.get('target')}", "press": f"press {st.get('key')}",
+            "say": "say", "scroll": f"scroll {st.get('dy', 400)}"}.get(k, f"{k} {st.get('target')}")
+
+
+def _rehearse(steps, limit, chars):
+    """Run the steps in a hidden tab starting from the visible tab's URL. Returns (records, skipped_reason)."""
+    url = js("location.href")
+    live_title = js("document.title")
+    sh = _Shadow(url)
+    recs = []
+    try:
+        strip = lambda t: _re.sub(r"^[^\w(\[]+", "", t or "").strip()   # the overlay prefixes the title with a status dot
+        if strip(sh.ev("document.title")) != strip(live_title):
+            return recs, f"the hidden tab shows a different page for this URL ({sh.ev('document.title')!r} vs {live_title!r}); the state is not in the URL"
+        for i, st in enumerate(steps):
+            rec = {"i": i, "step": _step_name(st), "ok": True}
+            t0 = _time.time()
+            try:
+                acted = sh.do(st)
+            except Exception as e:
+                acted = False; rec["why"] = f"error: {str(e)[:160]}"
+            if not acted:
+                rec["ok"] = False; rec.setdefault("why", "target not found")
+            elif st.get("expect") and not sh.wait_for(_expect_expr(st["expect"]), st.get("timeout", 6.0)):
+                rec["ok"] = False; rec["why"] = f"expected {st['expect']!r} did not appear"
+            if st.get("_text") is not None:
+                rec["text"] = st.pop("_text")
+            try:
+                rec["url"], rec["title"] = sh.ev("location.href"), sh.ev("document.title")
+            except Exception:
+                pass
+            if not rec["ok"] or i == len(steps) - 1:
+                try:
+                    rec["map"] = sh.map(limit, chars)
+                except Exception:
+                    pass
+            rec["s"] = round(_time.time() - t0, 2)
+            recs.append(rec)
+            _check()
+            if not rec["ok"]:
+                break
+        return recs, None
+    finally:
+        sh.close()
+
+
+def _do_visible(st):
+    """Perform one step with the normal choreography; returns a record."""
+    k, t, label = st["kind"], st.get("target"), st.get("label", "")
+    rec = {"step": _step_name(st), "ok": True}
+    t0 = _time.time()
+    if k == "click":
+        rec["ok"] = bool(focus_click(t, label)); focus_settled()
+    elif k == "type":
+        rec["ok"] = bool(focus_type(t, st["text"], label))
+    elif k == "press":
+        rec["ok"] = focus_press(st["key"], label) is not False; focus_settled()
+    elif k == "goto":
+        rec["ok"] = focus_goto(t, label) is not None
+    elif k == "wait":
+        rec["ok"] = focus_wait_for(t, st.get("timeout", 6.0), label)
+    elif k == "read":
+        rec["text"] = focus_read(t, label); rec["ok"] = rec["text"] is not None
+    elif k == "scroll":
+        focus_scroll(st.get("dy", 400), label)
+    elif k == "say":
+        focus_say(st["text"], st.get("mood", "info"))
+    if rec["ok"] and st.get("expect"):
+        if not focus_wait_for("js:" + _expect_expr(st["expect"]), st.get("timeout", 6.0)):
+            rec["ok"] = False; rec["why"] = f"expected {st['expect']!r} did not appear"
+    elif not rec["ok"]:
+        rec["why"] = "target not found or skipped"
+    rec["url"] = js("location.href")
+    rec["s"] = round(_time.time() - t0, 2)
+    return rec
+
+
+def focus_run(steps, label="", rehearse=True, limit=60, chars=600):
+    """Several steps in one script. With rehearse=True (default) the plan is first replayed in a
+    hidden tab that shares the session; the viewer sees a REHEARSING chip. If the rehearsal
+    fails at step k, only the k steps before it are performed visibly and the result carries
+    `ahead`: the map of what the failing step actually produced, so the next script starts
+    from knowledge instead of a guess. Never rehearse a step with side effects (an order, a
+    message, a delete): pass rehearse=False for those.
+
+    Returns {ok, done, steps:[{step, ok, why?, url, text?}], stopped_at?, why?, ahead?,
+    rehearsal:[...], map: map of the visible page at the end}."""
+    steps = [_norm_step(s) for s in steps]
+    _gate("RUN", label or f"{len(steps)} steps", approval=False)
+    if label:
+        focus_say(label)
+    out = {"ok": True, "done": 0, "steps": [], "rehearsal": None, "map": None}
+    to_run, failed = steps, None
+    if rehearse and steps:
+        js(f"window.__focus.chip('REHEARSING', {_q('%d steps in a hidden tab' % len(steps))})")
+        t0 = _time.time()
+        recs, skipped = _rehearse(steps, limit, chars)
+        out["rehearsal"] = recs
+        if skipped:
+            out["rehearsal_skipped"] = skipped
+            focus_say("Could not rehearse: " + skipped + " — performing the steps directly", "warn")
+        else:
+            failed = next((r for r in recs if not r["ok"]), None)
+            if failed:
+                k = failed["i"]; to_run = steps[:k]
+                out.update(stopped_at=k, why=failed.get("why"), ahead=failed.get("map"))
+                focus_say(f"Rehearsal stopped at step {k + 1} ({failed['step']}): {failed.get('why')} — doing the {k} step{'s' if k != 1 else ''} before it, then re-planning", "warn")
+            else:
+                js(f"window.__focus.note({_q('rehearsed %d steps in %.1f s: all fine, performing them now' % (len(steps), _time.time() - t0))})")
+        js("window.__focus.chip('THINKING', '')")
+    for i, st in enumerate(to_run):
+        rec = _do_visible(st)
+        out["steps"].append(rec)
+        if not rec["ok"]:
+            out["ok"] = False
+            focus_say(f"Step {i + 1} ({rec['step']}) failed: {rec.get('why')}", "warn")
+            break
+        out["done"] = i + 1
+    if failed:
+        out["ok"] = False
+    out["map"] = focus_map(limit, chars)
+    return out
 
 
 def focus_clear():

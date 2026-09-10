@@ -10,9 +10,10 @@ focus_peek(["#mw-content-text a[href='/wiki/LaTeX']", "#mw-content-text a[href='
 focus_read("#mw-content-text .mw-parser-output p", "First paragraph — what is this page about?")
 focus_shot("/tmp/focus-demo-1.png")
 
-focus_type("#searchInput, input[name=search]", "Digital product passport", "Searching for a related topic")
-focus_press("Enter", "Submitting the search")
-focus_wait_for("#firstHeading")
+r = focus_run([
+    ("type", "#searchInput", "Digital product passport", "Searching for a related topic"),
+    {"kind": "press", "key": "Enter", "label": "Submitting the search", "expect": "#firstHeading"},
+], "Two steps as one plan — rehearsed in a hidden tab first")
 focus_install()
 
 focus_look("#firstHeading", "Landed on the result page")

@@ -35,6 +35,8 @@ and SPA re-renders do not lose the overlay.
 | narration | `focus_say(text, mood)` | bottom bar; mood `info`, `warn` (amber, for bugs), `ok` (green, for verified state) |
 | `wait(4)` after a click | `focus_settled()` / `focus_wait_for(selector)` | nothing; the script just continues the moment the page is ready |
 | clicking a link to see where it goes | `focus_peek(selector_or_url)` | a dashed PEEKING ring on the link; the page is read ahead without leaving |
+| screenshot + probing for selectors | `focus_map()` / `print(focus_brief(m))` | a MAPPING chip; returns every visible interactive element with a verified-unique selector |
+| one action per script | `focus_run([...steps], label)` | a REHEARSING chip while the plan replays in a hidden tab, then each step with its normal choreography |
 | `screenshot(path)` | `focus_shot(path)` | same, but the overlay is in the frame, so it doubles as evidence |
 | end of session | `focus_clear()` | overlay fades out |
 
@@ -88,6 +90,35 @@ reads the page in a hidden background tab for about a second and closes it
 three actions and run them in one script, each followed by
 `focus_settled()`, so the viewer sees a continuous run instead of stop-and-go.
 
+## Map and run — several steps per script
+
+`focus_map()` is the page in one call: `{url, title, headings, text, els}`
+where each element is `{i, tag, text, sel, rect, href?, type?, name?,
+value?, options?}` and `sel` has been checked unique in the document (shadow
+DOM elements carry `shadow: true` and a rect for `focus_click_at`). Read it
+with `print(focus_brief(m))`, then write the next few steps:
+
+```python
+r = focus_run([
+    ("type", "#q", "colmar", "Searching for the destination"),
+    {"kind": "press", "key": "Enter", "expect": "url:results"},
+    {"kind": "click", "target": "a[href*=details]", "label": "Opening the first result", "expect": "text:Price"},
+    ("read", ".price", "The price we came for"),
+], "Search, open the first result, read its price")
+print(r["ok"], r["done"], focus_brief(r["map"], 30))
+```
+
+Steps: `click`, `type`, `press`, `goto`, `wait`, `read`, `scroll`, `say`, as
+tuples or dicts; any step may carry `expect` (`url:…`, `text:…`, `js:…` or a
+selector) and `timeout`. The plan is first replayed in a hidden tab that
+shares the session (DOM-level clicks and typing, so it never needs focus).
+If step k fails there, only the k steps before it are performed visibly and
+the result has `stopped_at`, `why` and `ahead`, the map of what the failing
+step actually produced. `rehearse=False` skips the hidden run: use it for
+anything with side effects, since the hidden tab performs the steps for real.
+The controlled tab is brought to the front automatically when it is hidden
+(a hidden tab neither animates nor accepts input).
+
 ## Faster
 
 Pacing is meant for humans, but the gaps should be yours, not the tool's:
@@ -98,8 +129,8 @@ Pacing is meant for humans, but the gaps should be yours, not the tool's:
 - Never guess a wait. `focus_settled()` returns when the page DOM has been
   quiet for 0.3 s; `focus_wait_for("#result")` returns the instant the
   selector is visible. Both keep polling for Esc, messages and boxes.
-- Batch. A script is cheap; a decision is not. Peek first, then put every
-  step you are already sure about into the same script.
+- Batch. A script is cheap; a decision is not. Map or peek first, then put
+  every step you are already sure about into one `focus_run`.
 
 ## The chat bubble — the viewer talks back
 
