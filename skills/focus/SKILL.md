@@ -40,6 +40,34 @@ Targets are CSS selectors or `(x, y)` viewport coordinates for canvas UIs.
 Every wrapper returns the same thing the raw helper would, plus the target
 rect where useful.
 
+## The dock — the viewer talks back
+
+Bottom-right of the page is a small control dock, the only part of the overlay
+that accepts clicks. Every wrapper passes through a gate that honours it:
+
+| Control | Effect on the driver |
+|---|---|
+| **Pause / Resume** | the next action blocks until Resume. While paused the page is the viewer's: they can log in, fix a form, scroll around. |
+| **Step** | lets exactly one action through, then pauses again. |
+| **Stop** | the next action raises `FocusStopped`; the script ends cleanly. |
+| **1× / 2× / 0.5×** | changes pacing live (same as `focus_speed`). |
+| **Ask me** | manual mode: every click, keystroke, typing and navigation shows "NEXT: CLICK …" and waits for **Approve** or **Skip**. Skip makes the wrapper return `False` without acting. Also settable with `focus_mode("manual")`. |
+| **Message box** | the text is queued; the next action raises `FocusMessage` with `.messages`. |
+
+Looking and reading are never gated for approval, only for pause/stop/messages,
+so the agent can keep observing while the viewer decides.
+
+**Protocol for `FocusMessage` and `FocusStopped`.** A driver script is one
+`browser-harness` run, so an interrupt ends that run with the exception text
+in the output ("FOCUS: viewer says: …"). Read it, answer with `focus_say`, and
+continue with a new script. Dock state (mode, speed, paused) lives in the tab
+and is restored after navigations, so nothing is lost between scripts. After a
+pause or takeover, re-assert the page (URL + a selector) before continuing:
+the viewer may have moved.
+
+Set `FOCUS_MODE=manual` in the environment to start every session in
+approval mode.
+
 ## Rules
 
 1. **Announce, locate, act.** Never act on something the viewer has not seen
@@ -55,11 +83,13 @@ rect where useful.
    without performing it, and do not perform one you did not animate.
 5. **Bugs go amber.** Anything unexpected gets `focus_say(..., "warn")` before
    you work around it, so the viewer never sees a silent retry.
-6. **Pace for humans.** Default pacing is about one action per second plus
+6. **Respect the dock.** Never bypass the gate with raw helpers when a viewer
+   is present. If a message arrives, answer it before doing anything else.
+7. **Pace for humans.** Default pacing is about one action per second plus
    reading time. `focus_speed(2)` for a viewer who knows the flow,
    `focus_speed(0.6)` for a demo audience. `FOCUS_SPEED=0` turns pauses off for
    unattended runs while keeping the overlay for the screenshots.
-7. **Clear at the end.** `focus_clear()` when the session is over, so the
+8. **Clear at the end.** `focus_clear()` when the session is over, so the
    user's tab is left clean.
 
 ## Walkthrough integration

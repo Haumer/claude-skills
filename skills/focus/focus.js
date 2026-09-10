@@ -8,6 +8,13 @@
 //   say(text, mood)            narration bar at the bottom ("info" | "warn" | "ok")
 //   clear()                    fade everything out
 //   rect(target)               viewport rect of the resolved target
+//   pending(kind, label)       show the next action in the dock (manual mode waits for Approve/Skip)
+//   poll()                     driver gate: returns {paused, step, stopped, mode, speed, approve, messages}
+//   setState({mode, speed})    restore driver-side settings after a navigation
+//
+// The dock (bottom-right) is the only part of the overlay that accepts pointer
+// events. It lets the viewer pause/resume, step, stop, change speed, switch to
+// "ask me" mode (approve/skip every action), and send a message to the agent.
 //
 // A target is a CSS selector string, an Element, or {x, y, w, h} in viewport px.
 // Every method returns a Promise that resolves when the animation has settled,
@@ -16,7 +23,7 @@
 // The overlay lives on <html>, not <body>, so SPA re-renders don't kill it.
 // Navigations do — focus.py re-injects on every call.
 (() => {
-  if (window.__focus && window.__focus.__v === 3) return;
+  if (window.__focus && window.__focus.__v === 4) return;
 
   const Z = 2147483647;
   const ACCENT = "#6366f1";
@@ -52,12 +59,34 @@
 #__fx-chip .__fx-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:${ACCENT};margin:0 7px 1px 2px;box-shadow:0 0 0 3px rgba(99,102,241,.3)}
 #__fx-chip.__fx-caret::after{content:"";display:inline-block;width:2px;height:12px;background:#fff;margin-left:6px;vertical-align:-2px;animation:__fx-caret 1s steps(2,start) infinite}
 @keyframes __fx-caret{to{visibility:hidden}}
-#__fx-say{position:fixed;bottom:18px;left:50%;transform:translateX(-50%) translateY(20px);max-width:760px;width:94vw;
+#__fx-say{position:fixed;bottom:18px;left:50%;transform:translateX(-50%) translateY(20px);max-width:min(760px,calc(100vw - 420px));width:94vw;
   background:#0f172a;color:#fff;padding:13px 20px;border-radius:14px;font:600 15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
   box-shadow:0 10px 40px rgba(0,0,0,.45);text-align:center;opacity:0;transition:opacity .3s,transform .3s,background .3s}
 #__fx-say.__fx-on{opacity:1;transform:translateX(-50%) translateY(0)}
 #__fx-say.__fx-warn{background:#7c2d12}
 #__fx-say.__fx-ok{background:#14532d}
+#__fx-dock{position:fixed;right:18px;bottom:18px;pointer-events:auto;background:#0f172a;color:#fff;border-radius:12px;padding:9px 10px;
+  box-shadow:0 10px 40px rgba(0,0,0,.45);font:500 12px/1.3 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;display:flex;flex-direction:column;gap:7px;min-width:250px;max-width:340px;
+  opacity:0;transform:translateY(12px);transition:opacity .3s,transform .3s}
+#__fx-dock.__fx-on{opacity:1;transform:none}
+#__fx-dock .__fx-status{display:flex;align-items:center;gap:7px;color:#cbd5e1}
+#__fx-dock .__fx-led{width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.25);flex:none}
+#__fx-dock.__fx-paused .__fx-led{background:#f59e0b;box-shadow:0 0 0 3px rgba(245,158,11,.25)}
+#__fx-dock.__fx-stopped .__fx-led{background:#ef4444;box-shadow:0 0 0 3px rgba(239,68,68,.25)}
+#__fx-dock .__fx-pending{display:none;background:#1e1b4b;border:1px solid #4338ca;border-radius:8px;padding:6px 8px;color:#e0e7ff}
+#__fx-dock.__fx-ask .__fx-pending{display:block}
+#__fx-dock .__fx-pending b{color:#c7d2fe;font-size:10px;letter-spacing:.08em;margin-right:6px}
+#__fx-dock .__fx-row{display:flex;gap:5px;flex-wrap:wrap}
+#__fx-dock button{all:unset;cursor:pointer;background:#1e293b;border:1px solid #334155;color:#fff;border-radius:7px;padding:5px 9px;font:600 12px/1 inherit;font-family:inherit}
+#__fx-dock button:hover{background:#334155}
+#__fx-dock button.__fx-primary{background:#4f46e5;border-color:#6366f1}
+#__fx-dock button.__fx-primary:hover{background:#6366f1}
+#__fx-dock button.__fx-active{background:#312e81;border-color:#6366f1;color:#c7d2fe}
+#__fx-dock .__fx-approve{display:none}
+#__fx-dock.__fx-ask .__fx-approve{display:flex}
+#__fx-dock input{all:unset;flex:1;min-width:120px;background:#1e293b;border:1px solid #334155;color:#fff;border-radius:7px;padding:5px 8px;font:500 12px/1.2 inherit;font-family:inherit}
+#__fx-dock input::placeholder{color:#64748b}
+#__fx-dock .__fx-hint{color:#64748b;font-size:10.5px}
 `;
 
   const CURSOR_SVG = `<svg viewBox="0 0 26 30" width="26" height="30" xmlns="http://www.w3.org/2000/svg" style="transform-origin:4px 3px">
@@ -77,9 +106,95 @@
     layer.id = "__fx-layer";
     layer.innerHTML = `<div id="__fx-spot"></div><div id="__fx-pulse"></div><div id="__fx-scan"></div>
 <div id="__fx-chip"><span class="__fx-dot"></span><span class="__fx-kind"></span><span class="__fx-text"></span></div>
-<div id="__fx-ripple"></div><div id="__fx-cursor">${CURSOR_SVG}</div><div id="__fx-say"></div>`;
+<div id="__fx-ripple"></div><div id="__fx-cursor">${CURSOR_SVG}</div><div id="__fx-say"></div>
+<div id="__fx-dock">
+  <div class="__fx-status"><span class="__fx-led"></span><span class="__fx-stext">agent running</span></div>
+  <div class="__fx-pending"><b class="__fx-pkind">NEXT</b><span class="__fx-plabel"></span></div>
+  <div class="__fx-row __fx-approve"><button class="__fx-primary" data-a="approve">Approve</button><button data-a="skip">Skip</button></div>
+  <div class="__fx-row"><button data-a="pause">Pause</button><button data-a="step">Step</button><button data-a="stop">Stop</button><button data-a="speed">1×</button><button data-a="ask">Ask me</button></div>
+  <div class="__fx-row"><input class="__fx-msg" placeholder="Tell the agent something…"><button data-a="send">Send</button></div>
+  <div class="__fx-hint">Paused = the page is yours. Resume when done.</div>
+</div>`;
     document.documentElement.appendChild(layer);
+    wireDock(layer);
     return layer;
+  }
+
+  // ---- viewer controls -------------------------------------------------
+  const SPEEDS = [1, 2, 0.5];
+  const state = window.__focus && window.__focus.state
+    ? window.__focus.state
+    : { paused: false, step: false, stopped: false, mode: "auto", speed: 1, approve: null, messages: [], pending: null };
+
+  function renderDock() {
+    const dock = $("__fx-dock"); if (!dock) return;
+    dock.classList.add("__fx-on");
+    dock.classList.toggle("__fx-paused", state.paused && !state.stopped);
+    dock.classList.toggle("__fx-stopped", state.stopped);
+    dock.classList.toggle("__fx-ask", state.mode === "manual");
+    const txt = dock.querySelector(".__fx-stext");
+    txt.textContent = state.stopped ? "stopped — the agent will exit at its next action"
+      : state.mode === "manual" && state.pending ? "waiting for your approval"
+      : state.paused ? "paused — you have the page" : "agent running";
+    dock.querySelector('[data-a="pause"]').textContent = state.paused ? "Resume" : "Pause";
+    dock.querySelector('[data-a="speed"]').textContent = state.speed + "×";
+    dock.querySelector('[data-a="ask"]').classList.toggle("__fx-active", state.mode === "manual");
+    if (state.pending) {
+      dock.querySelector(".__fx-pkind").textContent = state.pending.kind;
+      dock.querySelector(".__fx-plabel").textContent = state.pending.label;
+    }
+  }
+
+  function wireDock(layer) {
+    const dock = layer.querySelector("#__fx-dock");
+    dock.addEventListener("click", (e) => {
+      const b = e.target.closest("button"); if (!b) return;
+      e.stopPropagation();
+      const a = b.dataset.a;
+      if (a === "pause") state.paused = !state.paused;
+      else if (a === "step") { state.paused = true; state.step = true; }
+      else if (a === "stop") state.stopped = true;
+      else if (a === "speed") state.speed = SPEEDS[(SPEEDS.indexOf(state.speed) + 1) % SPEEDS.length];
+      else if (a === "ask") state.mode = state.mode === "manual" ? "auto" : "manual";
+      else if (a === "approve") state.approve = "yes";
+      else if (a === "skip") state.approve = "skip";
+      else if (a === "send") sendMsg();
+      renderDock();
+    });
+    const input = dock.querySelector(".__fx-msg");
+    input.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") { sendMsg(); } });
+    input.addEventListener("keyup", (e) => e.stopPropagation());
+    input.addEventListener("keypress", (e) => e.stopPropagation());
+    function sendMsg() {
+      const v = input.value.trim(); if (!v) return;
+      state.messages.push(v); input.value = "";
+      dock.querySelector(".__fx-stext").textContent = "message queued — the agent reads it at its next action";
+    }
+    renderDock();
+  }
+
+  function pending(kind, label) {
+    ensure();
+    state.pending = { kind, label: label || "" };
+    state.approve = null;
+    renderDock();
+    return true;
+  }
+
+  function poll() {
+    ensure();
+    const out = { paused: state.paused, step: state.step, stopped: state.stopped, mode: state.mode,
+                  speed: state.speed, approve: state.approve, messages: state.messages.splice(0) };
+    if (state.step) state.step = false;          // a step is consumed by one poll that lets an action through
+    if (state.approve) { state.approve = null; state.pending = null; }
+    renderDock();
+    return JSON.stringify(out);
+  }
+
+  function setState(patch) {
+    Object.assign(state, patch || {});
+    renderDock();
+    return true;
   }
 
   function resolve(target) {
@@ -211,5 +326,5 @@
     return t ? rectOf(t, 0) : null;
   }
 
-  window.__focus = { __v: 3, ensure, look, read, act, typing, doneTyping, say, clear, rect };
+  window.__focus = { __v: 4, ensure, look, read, act, typing, doneTyping, say, clear, rect, state, pending, poll, setState };
 })();

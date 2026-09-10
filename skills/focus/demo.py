@@ -2,7 +2,7 @@
 import os
 exec(open(os.path.expanduser("~/.claude/skills/focus/focus.py")).read())
 
-focus_new_tab("https://en.wikipedia.org/wiki/Typst", "Demo: watching the agent work through Wikipedia")
+focus_new_tab("https://en.wikipedia.org/wiki/Typst", "Demo: watching the agent work through Wikipedia — the dock bottom-right lets you pause, step, approve or message me")
 
 focus_read("#mw-content-text .mw-parser-output p", "First paragraph — what is this page about?")
 focus_shot("/tmp/focus-demo-1.png")

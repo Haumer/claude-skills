@@ -13,6 +13,12 @@
 # Speed: set FOCUS_SPEED (float, default 1.0; 2.0 = twice as fast, 0.5 = slower)
 # or call focus_speed(x). Set FOCUS_SPEED=0 to skip all pauses (overlay still shows).
 #
+# Interactive: the overlay's dock lets the viewer pause/resume, step, stop,
+# change speed, switch to "ask me" mode (Approve/Skip per action) and send a
+# message. Every wrapper passes through _gate() first, which honours those.
+# Stop raises FocusStopped; a message raises FocusMessage (read it, answer,
+# continue with a new script — the dock state lives in the tab).
+#
 # The harness runs driver scripts through a nested exec(), where names defined
 # at the top level land in a locals dict that function bodies cannot see. The
 # last line of this file therefore copies everything it defines into globals().
@@ -24,12 +30,76 @@ import time as _time
 FOCUS_DIR = _os.path.expanduser(_os.environ.get("FOCUS_SKILL_DIR", "~/.claude/skills/focus"))
 _FOCUS_JS = open(_os.path.join(FOCUS_DIR, "focus.js")).read()
 _SPEED = float(_os.environ.get("FOCUS_SPEED", "1.0"))
+_STATE = {"mode": _os.environ.get("FOCUS_MODE", "auto"), "speed": _SPEED}
+
+
+class FocusStopped(Exception):
+    """The viewer pressed Stop in the dock."""
+    def __str__(self):
+        return "FOCUS: viewer pressed Stop — the session ended at the next action."
+
+
+class FocusMessage(Exception):
+    """The viewer sent a message from the dock. .messages is the list of strings."""
+    def __init__(self, messages):
+        super().__init__(messages)
+        self.messages = list(messages)
+    def __str__(self):
+        return "FOCUS: viewer says: " + " | ".join(self.messages) + "  (answer them with focus_say, then continue with a new script)"
+
+
+def _push_state():
+    if js("!!(window.__focus && window.__focus.setState)"):
+        js(f"window.__focus.setState({_q(_STATE)})")
 
 
 def focus_speed(x):
-    """1.0 = default pacing, 2.0 = twice as fast, 0 = no pauses."""
+    """1.0 = default pacing, 2.0 = twice as fast, 0 = no pauses. The viewer can change it in the dock too."""
     global _SPEED
     _SPEED = float(x)
+    _STATE["speed"] = _SPEED
+    _push_state()
+
+
+def focus_mode(mode):
+    """'auto' (default) or 'manual' — in manual mode every click/type/key/navigation waits for Approve or Skip in the dock."""
+    _STATE["mode"] = mode
+    _push_state()
+
+
+def _gate(kind, label, approval=True):
+    """Honour the dock: pause/step/stop/messages, and Approve/Skip in manual mode.
+
+    Returns True to proceed, False if the viewer skipped this action."""
+    global _SPEED
+    focus_install()
+    if approval:
+        js(f"window.__focus.pending({_q(kind)}, {_q(label)})")
+    while True:
+        raw = js("window.__focus && window.__focus.poll()")
+        if not raw:                      # page navigated under us — re-inject and retry
+            _time.sleep(0.3)
+            focus_install()
+            continue
+        st = _json.loads(raw)
+        if st.get("speed") not in (None, _SPEED):
+            _SPEED = float(st["speed"]); _STATE["speed"] = _SPEED
+        _STATE["mode"] = st.get("mode", _STATE["mode"])
+        if st.get("stopped"):
+            raise FocusStopped()
+        if st.get("messages"):
+            raise FocusMessage(st["messages"])
+        if approval and _STATE["mode"] == "manual":
+            if st.get("approve") == "yes":
+                return True
+            if st.get("approve") == "skip":
+                return False
+            _time.sleep(0.25)
+            continue
+        if st.get("paused") and not st.get("step"):
+            _time.sleep(0.25)
+            continue
+        return True
 
 
 def _pause(seconds):
@@ -52,9 +122,10 @@ def _target(t):
 
 def focus_install():
     """Inject the overlay engine if this document doesn't have it yet. Safe to call often."""
-    if js("!!(window.__focus && window.__focus.__v === 3)"):
+    if js("!!(window.__focus && window.__focus.__v === 4)"):
         return True
     js(_FOCUS_JS)
+    _push_state()
     return bool(js("!!window.__focus"))
 
 
@@ -72,6 +143,7 @@ def focus_say(text, mood="info"):
 
 def focus_look(target, label="", hold=0.8):
     """Spotlight a region and glide the cursor to it. Returns its viewport rect or None."""
+    _gate("LOOK", label or str(target), approval=False)
     r = _call("look", target, label)
     _pause(hold)
     return r
@@ -81,7 +153,7 @@ def focus_read(target, label="", seconds=None):
     """Spotlight a region, sweep a scan line over it, return its innerText.
 
     Duration scales with text length (about 250 words per 4 s) unless given."""
-    focus_install()
+    _gate("READ", label or str(target), approval=False)
     text = js(f"(e=>e?e.innerText:null)(document.querySelector({_q(target)}))") if isinstance(target, str) else None
     if isinstance(target, str) and text is None:
         focus_say(f"Could not find: {label or target}", "warn")
@@ -94,8 +166,10 @@ def focus_read(target, label="", seconds=None):
     return text
 
 
-def focus_click(target, label="", settle=0.5):
+def focus_click(target, label="", settle=0.5, _gated=False):
     """Announce, glide, ripple, then really click the element's centre. Returns True if clicked."""
+    if not _gated and not _gate("CLICK", label or str(target)):
+        return False
     r = _call("act", target, label)
     if not r:
         focus_say(f"Could not find: {label or target}", "warn")
@@ -112,7 +186,9 @@ def focus_click_at(x, y, label="", settle=0.5):
 
 def focus_type(target, text, label="", per_char=0.035, max_seconds=2.5):
     """Click into the field, then type for real, visibly, one character at a time."""
-    if not focus_click(target, label or f"type: {text[:40]}", settle=0.15):
+    if not _gate("TYPE", f"{label or target}: “{text[:50]}”"):
+        return False
+    if not focus_click(target, label or f"type: {text[:40]}", settle=0.15, _gated=True):
         return False
     focus_install()
     js(f"window.__focus.typing({_target(target)}, {_q(label or text[:60])})")
@@ -130,6 +206,8 @@ def focus_type(target, text, label="", per_char=0.035, max_seconds=2.5):
 
 def focus_press(key, label=""):
     """Press a key (Enter, Tab, Escape…) with a short narration beat."""
+    if not _gate("KEY", f"{key} — {label}" if label else key):
+        return False
     if label:
         focus_say(label)
     press_key(key)
@@ -138,6 +216,8 @@ def focus_press(key, label=""):
 
 def focus_goto(url, label=None, timeout=15.0):
     """Navigate in the current tab, re-inject the overlay, keep the narration bar alive."""
+    if not _gate("NAVIGATE", label or url):
+        return None
     focus_say(label or f"Opening {url}")
     _pause(0.5)
     goto(url)
@@ -160,6 +240,7 @@ def focus_new_tab(url, label=None, timeout=15.0):
 
 def focus_scroll(dy=400, label="", steps=4):
     """Scroll in visible steps instead of one jump."""
+    _gate("SCROLL", label or f"{dy}px", approval=False)
     if label:
         focus_say(label)
     info = page_info()
@@ -185,4 +266,4 @@ def focus_clear():
 
 # --- make the wrappers visible to each other under the harness's nested exec() ---
 globals().update({k: v for k, v in dict(locals()).items()
-                  if not k.startswith("__") and (k.startswith(("focus_", "_")) or k == "FOCUS_DIR")})
+                  if not k.startswith("__") and (k.startswith(("focus_", "Focus", "_")) or k == "FOCUS_DIR")})
