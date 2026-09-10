@@ -33,6 +33,9 @@ import time as _time
 
 FOCUS_DIR = _os.path.expanduser(_os.environ.get("FOCUS_SKILL_DIR", "~/.claude/skills/focus"))
 _FOCUS_JS = open(_os.path.join(FOCUS_DIR, "focus.js")).read()
+import hashlib as _hashlib
+_FOCUS_SRC = _hashlib.sha1(_FOCUS_JS.encode()).hexdigest()[:10]
+_FOCUS_JS = _FOCUS_JS.replace('"__SRC__"', _json.dumps(_FOCUS_SRC), 1)
 _SPEED = float(_os.environ.get("FOCUS_SPEED", "1.0"))
 _STATE = {"mode": _os.environ.get("FOCUS_MODE", "auto"), "speed": _SPEED}
 
@@ -195,10 +198,11 @@ def _target(t):
 
 def focus_install():
     """Inject the overlay engine if this document doesn't have it yet. Safe to call often."""
-    if js("!!(window.__focus && window.__focus.__v === 7)"):
+    if js(f"!!(window.__focus && window.__focus.__v === 8 && window.__focus.__src === {_q(_FOCUS_SRC)})"):
         return True
     js(_FOCUS_JS)
     _push_state()
+    js("window.__focus && window.__focus.ensure()")     # build the scene now, restoring the pre-navigation one if there is a snapshot
     return bool(js("!!window.__focus"))
 
 

@@ -44,14 +44,25 @@ Targets are CSS selectors or `(x, y)` viewport coordinates for canvas UIs.
 Every wrapper returns the same thing the raw helper would, plus the target
 rect where useful.
 
-## Always in motion
+## Always in motion, and honest about it
 
 The overlay never freezes, even while the driver is between scripts: the
-cursor drifts gently around its target, the ring around the target breathes,
-and after about two seconds without a call the chip switches to
-"THINKING · deciding the next step" until the next action lands. The viewer
-can always tell the difference between "the agent is thinking" and "the agent
-is stuck".
+cursor drifts gently around its target and the ring breathes. After about two
+seconds without a call the agent visibly lets go: ring and spotlight fade, the
+cursor drifts to a rest spot beside the last target, and the chip reads
+"THINKING · deciding the next step · 12 s" with a running clock, so the viewer
+never mistakes an old highlight for a current intention. Three more things
+keep the scene truthful:
+
+- **Dialogs are never buried.** When a modal opens and the target is outside
+  it, the spotlight releases; when the modal reaches into the narration bar's
+  zone, the bar moves to the top of the page.
+- **Navigations keep the scene.** Cursor position, chip, bar text and the
+  chat transcript are snapshotted in the tab and restored the moment the
+  overlay is re-injected, so the first glide on a new page starts from where
+  the cursor was, not from a corner.
+- **Gone targets release.** If the element under the ring is removed by a
+  re-render, the ring fades instead of framing empty space.
 
 ## Survey — show the options before choosing
 

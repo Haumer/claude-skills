@@ -23,8 +23,13 @@
 //   addBox(rect, note)           programmatic annotation (what the P-mode drawing does)
 //
 // The overlay never freezes: the cursor drifts around its target while idle,
-// the ring breathes, and after ~2 s without a call the chip turns into a
-// THINKING indicator until the next action arrives.
+// the ring breathes, and after ~2 s without a call the agent visibly lets go of
+// the target: ring and spotlight fade, the cursor drifts to a rest spot and the
+// chip reads THINKING with a running clock until the next action arrives.
+// A dialog opening under the overlay releases the spotlight (unless the target
+// is inside it) and moves the narration bar to the top, out of its way.
+// Cursor position, chip, bar and chat are snapshotted to sessionStorage and
+// restored on the next injection, so a navigation does not reset the scene.
 //
 // Viewer channel: a chat bubble bottom-right. Open it for the transcript,
 // Pause / Step / Stop / speed / "Ask me" (approve or skip every action), and a
@@ -37,8 +42,8 @@
 // The overlay lives on <html>, not <body>, so SPA re-renders don't kill it.
 // Navigations do — focus.py re-injects on every call.
 (() => {
-  const V = 7;
-  if (window.__focus && window.__focus.__v === V) return;
+  const V = 8, SRC = "__SRC__";                       // SRC is filled by focus.py with a hash of this file
+  if (window.__focus && window.__focus.__v === V && window.__focus.__src === SRC) return;
   const prev = window.__focus;
 
   const Z = 2147483647;
@@ -90,6 +95,8 @@
   background:#0f172a;color:#fff;padding:13px 20px;border-radius:14px;font:600 15px/1.45 ${FONT};
   box-shadow:0 10px 40px rgba(0,0,0,.45);text-align:center;opacity:0;transition:opacity .3s,transform .3s,background .3s}
 #__fx-say.__fx-on{opacity:1;transform:translateX(-50%) translateY(0)}
+#__fx-say.__fx-top{bottom:auto;top:18px}
+#__fx-spot.__fx-off,#__fx-ring.__fx-off{opacity:0!important;animation:none!important;transition:opacity .4s!important}
 #__fx-say.__fx-warn{background:#7c2d12}
 #__fx-say.__fx-ok{background:#14532d}
 /* ---- chat bubble + panel ---- */
@@ -184,14 +191,51 @@
 </div>
 <div id="__fx-bubble">${CHAT_SVG}<span id="__fx-led"></span><span id="__fx-badge"></span></div>`;
     document.documentElement.appendChild(layer);
+    void layer.offsetWidth;                              // commit the initial styles so the first move animates
     wire(layer);
     render();
     startLife();
+    applyRestore();
     return layer;
   }
 
+  // ---- snapshot across navigations (sessionStorage; SPA re-renders keep `prev` in memory instead)
+  const KEY = "__focus_snapshot";
+  function snap() {
+    try {
+      sessionStorage.setItem(KEY, JSON.stringify({ t: Date.now(), anchor: life.anchor, kind: life.kind, label: life.label, say: life.say,
+        st: { chat: state.chat.slice(-40), unread: state.unread, open: state.open, mode: state.mode, speed: state.speed, boxSeq: state.boxSeq,
+              paused: state.paused, stopped: state.stopped, exited: state.exited } }));
+    } catch (_) {}
+  }
+  function loadRestore() {
+    if (prev) return;
+    try {
+      const s = JSON.parse(sessionStorage.getItem(KEY) || "null");
+      if (s && Date.now() - s.t < 180000) { Object.assign(state, s.st || {}); life.restore = s; }
+    } catch (_) {}
+  }
+  function applyRestore() {
+    const s = life.restore; if (!s) return; life.restore = null;
+    const cur = $("__fx-cursor"), chip = $("__fx-chip"), say = $("__fx-say"), layer = $("__fx-layer");
+    if (s.anchor) {
+      const a = { x: Math.min(Math.max(s.anchor.x, 20), innerWidth - 30), y: Math.min(Math.max(s.anchor.y, 20), innerHeight - 40) };
+      layer.style.setProperty("--fx-nt", "1");
+      [cur, chip, say].forEach((e) => (e.style.transition = "none"));
+      cur.style.transform = `translate(${a.x}px,${a.y}px)`; cur.classList.add("__fx-on", "__fx-idle");
+      life.anchor = a; life.kind = ""; life.label = "";           // the old action is over; the chip only says THINKING now
+      if (s.say && s.say.text) { say.textContent = s.say.text; say.classList.add("__fx-on"); say.classList.toggle("__fx-warn", s.say.mood === "warn"); say.classList.toggle("__fx-ok", s.say.mood === "ok"); life.say = s.say; }
+      life.last = Date.now() - 1800;                      // the page just changed: show THINKING almost at once
+      think("new page, picking up");                      // parks the chip too, still without transitions
+      void layer.offsetWidth;
+      [cur, chip, say].forEach((e) => (e.style.transition = ""));
+    }
+  }
+  addEventListener("pagehide", snap);
+
   // ---- continuous motion: idle drift, breathing ring, THINKING after silence
-  const life = { anchor: null, kind: "", label: "", last: Date.now(), thinking: false, raf: 0 };
+  const life = { anchor: null, el: null, kind: "", label: "", say: null, last: Date.now(), thinking: false, thinkStart: 0, thinkWhy: "", raf: 0, check: 0, restore: null };
+  loadRestore();
   function touch(kind, label) { life.last = Date.now(); if (kind !== undefined) { life.kind = kind; life.label = label || ""; } if (life.thinking) unthink(); }
   function unthink() {
     life.thinking = false;
@@ -199,13 +243,39 @@
     chip.classList.remove("__fx-think");
     chip.querySelector(".__fx-kind").textContent = life.kind;
     chip.querySelector(".__fx-text").textContent = life.label;
+    chip.classList.toggle("__fx-on", !!(life.kind || life.label));
   }
-  function think() {
-    life.thinking = true;
-    const chip = $("__fx-chip"); if (!chip || !life.anchor) return;
+  // Let go of the current target: ring and spotlight fade, the cursor stays.
+  function release() {
+    const spot = $("__fx-spot"), ring = $("__fx-ring"); if (!spot) return;
+    spot.classList.add("__fx-off"); ring.classList.add("__fx-off");
+    life.el = null;
+  }
+  function hold() { const spot = $("__fx-spot"), ring = $("__fx-ring"); if (spot) { spot.classList.remove("__fx-off"); ring.classList.remove("__fx-off"); } }
+  function think(why) {
+    life.thinking = true; life.thinkStart = Date.now(); life.thinkWhy = why || "deciding the next step";
+    const chip = $("__fx-chip"), cur = $("__fx-cursor"); if (!chip || !life.anchor) return;
+    release();
+    // drift to a rest spot beside the last target, chip tucked under the cursor
+    const rx = Math.min(Math.max(life.anchor.x + 64, 24), innerWidth - 40), ry = Math.min(Math.max(life.anchor.y + 44, 24), innerHeight - 60);
+    life.anchor = { x: rx, y: ry };
+    cur.style.transform = `translate(${rx}px,${ry}px)`; cur.classList.add("__fx-on", "__fx-idle");
+    Object.assign(chip.style, { left: rx + "px", top: ry + "px", transform: rx > innerWidth - 320 ? "translate(calc(-100% + 8px),26px)" : "translate(14px,26px)" });
     chip.classList.add("__fx-think", "__fx-on");
     chip.querySelector(".__fx-kind").textContent = "THINKING";
-    chip.querySelector(".__fx-text").textContent = "deciding the next step";
+    chip.querySelector(".__fx-text").textContent = life.thinkWhy;
+  }
+  const visible = (e) => { if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 40 && r.height > 40 && getComputedStyle(e).visibility !== "hidden"; };
+  // Every 300 ms: is a dialog in the way? is the target still there?
+  function surroundings() {
+    const say = $("__fx-say"); if (!say) return;
+    const modal = [...document.querySelectorAll('dialog[open],[role="dialog"],[aria-modal="true"]')].find(visible);
+    if (modal) {
+      const r = modal.getBoundingClientRect();
+      say.classList.toggle("__fx-top", r.bottom > innerHeight - 130);
+      if (life.el && !modal.contains(life.el)) release();
+    } else say.classList.remove("__fx-top");
+    if (life.el && (!life.el.isConnected || !life.el.getClientRects().length)) release();
   }
   function startLife() {
     if (life.raf) return;
@@ -214,13 +284,18 @@
       const cur = $("__fx-cursor"); if (!cur) { life.raf = 0; return; }
       const t = performance.now();
       const idle = cur.classList.contains("__fx-idle");
-      const amp = life.thinking ? 16 : idle ? 7 : 0;
-      const dx = amp * (Math.sin(t / 1100) * 0.7 + Math.sin(t / 2300) * 0.3);
-      const dy = amp * (Math.cos(t / 1400) * 0.6 + Math.sin(t / 3100) * 0.4);
+      const amp = life.thinking ? 22 : idle ? 7 : 0;
+      const dx = amp * (Math.sin(t / 1300) * 0.7 + Math.sin(t / 2700) * 0.3);
+      const dy = amp * (Math.cos(t / 1700) * 0.6 + Math.sin(t / 3400) * 0.4);
       const drift = cur.querySelector(".__fx-drift");
       if (drift) drift.style.transform = `translate(${dx.toFixed(1)}px,${dy.toFixed(1)}px)`;
-      const silent = Date.now() - life.last;
+      const now = Date.now(), silent = now - life.last;
       if (!life.thinking && silent > 2200 && life.anchor && !state.paused && !state.annotating) think();
+      if (life.thinking) {
+        const secs = Math.round((now - life.thinkStart) / 1000);
+        const chip = $("__fx-chip"); if (chip && secs >= 3) chip.querySelector(".__fx-text").textContent = `${life.thinkWhy} · ${secs} s`;
+      }
+      if (now - life.check > 300) { life.check = now; surroundings(); }
     };
     life.raf = requestAnimationFrame(tick);
   }
@@ -252,10 +327,12 @@
       last = n;
     }
   }
-  function place(r, kind, label, soft = false) {
+  function place(r, kind, label, soft = false, el = null) {
     ensure();
     touch(kind, label);
     $("__fx-layer").classList.remove("__fx-hidden");
+    hold();
+    life.el = el instanceof Element ? el : null;
     const spot = $("__fx-spot"), ring = $("__fx-ring"), chip = $("__fx-chip"), cur = $("__fx-cursor");
     Object.assign(spot.style, { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px" });
     Object.assign(ring.style, { left: r.x - 5 + "px", top: r.y - 5 + "px", width: r.w + 10 + "px", height: r.h + 10 + "px" });
@@ -270,13 +347,14 @@
     chip.style.transform = r.y > 48 ? "translate(-8px,-140%)" : `translate(-8px,${r.h + 10}px)`;
     Object.assign(chip.style, { left: r.x + 8 + "px", top: r.y + "px" });
     chip.classList.toggle("__fx-on", !!(label || kind));
+    snap();
     return { cx, cy };
   }
 
   async function look(target, label, kind = "LOOKING") {
     const t = resolve(target); if (!t) return null;
     await bringIntoView(t);
-    const r = rectOf(t), p = place(r, kind, label);
+    const r = rectOf(t), p = place(r, kind, label, false, t);
     await sleep(480);
     $("__fx-cursor").classList.add("__fx-idle");
     touch();
@@ -286,7 +364,7 @@
     const t = resolve(target); if (!t) return null;
     await bringIntoView(t);
     const r = rectOf(t);
-    place(r, "READING", label);
+    place(r, "READING", label, false, t);
     $("__fx-cursor").style.transform = `translate(${r.x - 14}px,${r.y - 10}px)`;
     life.anchor = { x: r.x - 14, y: r.y - 10 };
     await sleep(300);
@@ -328,7 +406,7 @@
       if (!t) { out.push(null); continue; }
       await bringIntoView(t);
       const r = rectOf(t);
-      place(r, `CANDIDATE ${i + 1}/${items.length}`, it.label || "", true);
+      place(r, `CANDIDATE ${i + 1}/${items.length}`, it.label || "", true, t);
       out.push(r);
       await sleep(ms);
     }
@@ -347,7 +425,7 @@
     const t = resolve(target); if (!t) return null;
     await bringIntoView(t);
     const r = rectOf(t);
-    place(r, "PEEKING", label || "reading ahead", true);
+    place(r, "PEEKING", label || "reading ahead", true, t);
     $("__fx-ring").classList.add("__fx-peek");
     await sleep(ms);
     $("__fx-ring").classList.remove("__fx-peek"); $("__fx-spot").classList.remove("__fx-soft");
@@ -406,7 +484,9 @@
     s.textContent = text || "";
     s.classList.toggle("__fx-warn", mood === "warn"); s.classList.toggle("__fx-ok", mood === "ok");
     s.classList.toggle("__fx-on", !!text);
+    life.say = text ? { text, mood } : null;
     if (text) push({ who: "agent", text, mood });
+    snap();
     return true;
   }
   function ack(text) {
@@ -420,7 +500,8 @@
     layer.classList.add("__fx-hidden"); await sleep(ms); layer.remove();
     const st = $("__fx-style"); if (st) st.remove();
     if (life.raf) { cancelAnimationFrame(life.raf); life.raf = 0; }
-    life.anchor = null;
+    life.anchor = null; life.el = null; life.say = null;
+    try { sessionStorage.removeItem(KEY); } catch (_) {}
     return true;
   }
   function rect(target) { const t = resolve(target); return t ? rectOf(t, 0) : null; }
@@ -430,7 +511,7 @@
     m.t = Date.now();
     state.chat.push(m); if (state.chat.length > 80) state.chat.shift();
     if (!state.open && (m.who === "agent" || m.type)) state.unread++;
-    render();
+    render(); snap();
   }
   function statusText() {
     if (state.stopped) return "stopped — exits at the next action";
@@ -497,7 +578,7 @@
     state.stopped = true; state.exited = true; state.paused = false; state.step = false; state.annotating = false;
     document.querySelectorAll(".__fx-box").forEach((b) => b.remove()); state.boxes = [];
     push({ who: "sys", text: text || "Esc — stopped by the viewer" });
-    clear(220);
+    clear(220); snap();
   }
   function resume() { state.stopped = false; state.exited = false; ensure(); render(); return true; }
   function onKey(e) {
@@ -665,7 +746,7 @@
   function peek() {
     return JSON.stringify({ stopped: state.stopped, paused: state.paused, messages: state.messages.length, annotations: state.annotations.length, annotating: state.annotating });
   }
-  function setState(patch) { Object.assign(state, patch || {}); render(); return true; }
+  function setState(patch) { Object.assign(state, patch || {}); render(); snap(); return true; }
 
-  window.__focus = { __v: V, state, ensure, look, read, act, typing, doneTyping, survey, say, ack, clear, rect, pending, poll, peek, setState, addBox, toggleAnnotate, peekAt, fetchText, settled, note, chip, exit, resume };
+  window.__focus = { __v: V, __src: SRC, state, life, ensure, look, read, act, typing, doneTyping, survey, say, ack, clear, rect, pending, poll, peek, setState, addBox, toggleAnnotate, peekAt, fetchText, settled, note, chip, exit, resume };
 })();
