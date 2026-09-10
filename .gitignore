@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+.pytest_cache/
+*.caption.txt
+# rendered output is ignored except the checked-in example
+*.pdf
+!skills/design-document/examples/example-paper.pdf
