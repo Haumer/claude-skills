@@ -25,7 +25,8 @@
 // The overlay never freezes: the cursor drifts around its target while idle,
 // the ring breathes, and after ~2 s without a call the agent visibly lets go of
 // the target: ring and spotlight fade, the cursor drifts to a rest spot and the
-// chip reads THINKING with a running clock until the next action arrives.
+// chip reads THINKING with a running clock until the next action arrives; meanwhile
+// the cursor tours nearby clickable things with a faint dashed ring (looking around).
 // A dialog opening under the overlay releases the spotlight (unless the target
 // is inside it) and moves the narration bar to the top, out of its way.
 // Cursor position, chip, bar and chat are snapshotted to sessionStorage and
@@ -42,7 +43,7 @@
 // The overlay lives on <html>, not <body>, so SPA re-renders don't kill it.
 // Navigations do — focus.py re-injects on every call.
 (() => {
-  const V = 8, SRC = "__SRC__";                       // SRC is filled by focus.py with a hash of this file
+  const V = 9, SRC = "__SRC__";                       // SRC is filled by focus.py with a hash of this file
   if (window.__focus && window.__focus.__v === V && window.__focus.__src === SRC) return;
   const prev = window.__focus;
 
@@ -97,6 +98,7 @@
 #__fx-say.__fx-on{opacity:1;transform:translateX(-50%) translateY(0)}
 #__fx-say.__fx-top{bottom:auto;top:18px}
 #__fx-spot.__fx-off,#__fx-ring.__fx-off{opacity:0!important;animation:none!important;transition:opacity .4s!important}
+#__fx-ring.__fx-wander{opacity:.45!important;border-style:dashed;animation:none!important}
 #__fx-say.__fx-warn{background:#7c2d12}
 #__fx-say.__fx-ok{background:#14532d}
 /* ---- chat bubble + panel ---- */
@@ -234,7 +236,7 @@
   addEventListener("pagehide", snap);
 
   // ---- continuous motion: idle drift, breathing ring, THINKING after silence
-  const life = { anchor: null, el: null, kind: "", label: "", say: null, last: Date.now(), thinking: false, thinkStart: 0, thinkWhy: "", raf: 0, check: 0, restore: null };
+  const life = { anchor: null, el: null, kind: "", label: "", say: null, last: Date.now(), thinking: false, thinkStart: 0, thinkWhy: "", raf: 0, check: 0, restore: null, wanderAt: 0, visited: [] };
   loadRestore();
   function touch(kind, label) { life.last = Date.now(); if (kind !== undefined) { life.kind = kind; life.label = label || ""; } if (life.thinking) unthink(); }
   function unthink() {
@@ -253,7 +255,7 @@
   }
   function hold() { const spot = $("__fx-spot"), ring = $("__fx-ring"); if (spot) { spot.classList.remove("__fx-off"); ring.classList.remove("__fx-off"); } }
   function think(why) {
-    life.thinking = true; life.thinkStart = Date.now(); life.thinkWhy = why || "deciding the next step";
+    life.thinking = true; life.thinkStart = Date.now(); life.thinkWhy = why || "deciding the next step"; life.wanderAt = 0; life.visited = [];
     const chip = $("__fx-chip"), cur = $("__fx-cursor"); if (!chip || !life.anchor) return;
     release();
     // drift to a rest spot beside the last target, chip tucked under the cursor
@@ -264,6 +266,35 @@
     chip.classList.add("__fx-think", "__fx-on");
     chip.querySelector(".__fx-kind").textContent = "THINKING";
     chip.querySelector(".__fx-text").textContent = life.thinkWhy;
+  }
+  // While thinking, look around: glide to a nearby clickable thing, faint dashed ring, move on.
+  function candidates() {
+    const out = [];
+    for (const e of document.querySelectorAll("a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],[role=menuitem]")) {
+      if (e.closest("#__fx-layer")) continue;
+      const r = e.getBoundingClientRect();
+      if (r.width < 24 || r.height < 12 || r.bottom < 8 || r.top > innerHeight - 8 || r.right < 8 || r.left > innerWidth - 8) continue;
+      out.push({ el: e, r }); if (out.length > 200) break;
+    }
+    return out;
+  }
+  function wander() {
+    const cur = $("__fx-cursor"), ring = $("__fx-ring"), chip = $("__fx-chip"); if (!cur || !life.anchor) return;
+    const a = life.anchor;
+    const near = candidates().map((c) => ({ c, d: Math.hypot(c.r.left + c.r.width / 2 - a.x, c.r.top + c.r.height / 2 - a.y) }))
+      .filter((x) => x.d > 30 && !life.visited.includes(x.c.el)).sort((p, q) => p.d - q.d).slice(0, 5);
+    if (!near.length) { life.visited = []; return; }
+    const pick = near[Math.floor(Math.random() * near.length)].c;
+    life.visited.push(pick.el); if (life.visited.length > 8) life.visited.shift();
+    const r = rectOf(pick.el, 4), cx = r.x + Math.min(r.w * 0.6, r.w - 8), cy = r.y + Math.min(r.h * 0.6, r.h - 6);
+    life.anchor = { x: cx, y: cy };
+    const slow = "1.1s cubic-bezier(.4,.1,.3,1)";
+    cur.style.transition = "transform " + slow; cur.style.transform = `translate(${cx}px,${cy}px)`;
+    Object.assign(ring.style, { left: r.x - 5 + "px", top: r.y - 5 + "px", width: r.w + 10 + "px", height: r.h + 10 + "px", transition: `left ${slow},top ${slow},width ${slow},height ${slow},opacity .4s` });
+    ring.classList.remove("__fx-off"); ring.classList.add("__fx-on", "__fx-wander");
+    chip.style.transition = `left ${slow},top ${slow},opacity .25s`;
+    Object.assign(chip.style, { left: cx + "px", top: cy + "px", transform: cx > innerWidth - 320 ? "translate(calc(-100% + 8px),26px)" : "translate(14px,26px)" });
+    if (life.thinkWhy === "deciding the next step") life.thinkWhy = "looking around while deciding";
   }
   const visible = (e) => { if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 40 && r.height > 40 && getComputedStyle(e).visibility !== "hidden"; };
   // Every 300 ms: is a dialog in the way? is the target still there?
@@ -291,6 +322,9 @@
       if (drift) drift.style.transform = `translate(${dx.toFixed(1)}px,${dy.toFixed(1)}px)`;
       const now = Date.now(), silent = now - life.last;
       if (!life.thinking && silent > 2200 && life.anchor && !state.paused && !state.annotating) think();
+      if (life.thinking && !state.paused && !state.annotating && !state.stopped && now - life.thinkStart > 1200 && now - life.wanderAt > 1700 + Math.random() * 900) {
+        life.wanderAt = now; wander();
+      }
       if (life.thinking) {
         const secs = Math.round((now - life.thinkStart) / 1000);
         const chip = $("__fx-chip"); if (chip && secs >= 3) chip.querySelector(".__fx-text").textContent = `${life.thinkWhy} · ${secs} s`;
@@ -334,6 +368,7 @@
     hold();
     life.el = el instanceof Element ? el : null;
     const spot = $("__fx-spot"), ring = $("__fx-ring"), chip = $("__fx-chip"), cur = $("__fx-cursor");
+    ring.classList.remove("__fx-wander"); ring.style.transition = ""; cur.style.transition = ""; chip.style.transition = "";
     Object.assign(spot.style, { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px" });
     Object.assign(ring.style, { left: r.x - 5 + "px", top: r.y - 5 + "px", width: r.w + 10 + "px", height: r.h + 10 + "px" });
     spot.classList.add("__fx-on"); spot.classList.toggle("__fx-soft", soft); ring.classList.add("__fx-on");

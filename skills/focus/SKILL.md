@@ -51,8 +51,12 @@ cursor drifts gently around its target and the ring breathes. After about two
 seconds without a call the agent visibly lets go: ring and spotlight fade, the
 cursor drifts to a rest spot beside the last target, and the chip reads
 "THINKING · deciding the next step · 12 s" with a running clock, so the viewer
-never mistakes an old highlight for a current intention. Three more things
-keep the scene truthful:
+never mistakes an old highlight for a current intention. From then on it looks
+around: every two seconds or so the cursor glides to a nearby clickable thing
+and rests a faint dashed ring on it, the way eyes scan a page while deciding,
+until the next real action snaps the ring back to solid. During a rehearsal the
+chip counts the steps as they replay ("REHEARSING · 3/6 · click Pricing").
+Three more things keep the scene truthful:
 
 - **Dialogs are never buried.** When a modal opens and the target is outside
   it, the spotlight releases; when the modal reaches into the narration bar's

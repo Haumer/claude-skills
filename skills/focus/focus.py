@@ -198,7 +198,7 @@ def _target(t):
 
 def focus_install():
     """Inject the overlay engine if this document doesn't have it yet. Safe to call often."""
-    if js(f"!!(window.__focus && window.__focus.__v === 8 && window.__focus.__src === {_q(_FOCUS_SRC)})"):
+    if js(f"!!(window.__focus && window.__focus.__v === 9 && window.__focus.__src === {_q(_FOCUS_SRC)})"):
         return True
     js(_FOCUS_JS)
     _push_state()
@@ -719,6 +719,7 @@ def _rehearse(steps, limit, chars):
         for i, st in enumerate(steps):
             rec = {"i": i, "step": _step_name(st), "ok": True}
             t0 = _time.time()
+            js(f"window.__focus.chip('REHEARSING', {_q('%d/%d · %s' % (i + 1, len(steps), _step_name(st)[:60]))})")
             try:
                 acted = sh.do(st)
             except Exception as e:
