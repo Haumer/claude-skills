@@ -337,10 +337,17 @@
     life.raf = requestAnimationFrame(tick);
   }
 
+  // A selector resolves to its first VISIBLE match (a nav often keeps a hidden copy of a link in a collapsed menu).
   function resolve(t) {
     if (!t) return null;
-    if (typeof t === "string") return document.querySelector(t);
-    return t;
+    if (typeof t !== "string") return t;
+    let first = null;
+    for (const e of document.querySelectorAll(t)) {
+      first = first || e;
+      const r = e.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== "hidden") return e;
+    }
+    return first;
   }
   function rectOf(t, pad = 6) {
     if (!t) return null;

@@ -620,7 +620,12 @@ class _Shadow:
         if k == "goto":
             cdp("Page.navigate", session_id=self.sid, url=t); self.wait_loaded(); return True
         if k == "click":
-            ok = self.ev(f"(e=>{{if(!e)return false;e.scrollIntoView({{block:'center'}});e.click();return true}})(document.querySelector({_q(t)}))")
+            ok = self.ev(f"""(()=>{{const es=[...document.querySelectorAll({_q(t)})];
+                const e=es.find(x=>{{const r=x.getBoundingClientRect();return r.width>0&&r.height>0&&getComputedStyle(x).visibility!=='hidden'}});
+                if(!e)return es.length?'hidden':false;e.scrollIntoView({{block:'center'}});e.click();return true}})()""")
+            if ok == "hidden":
+                st["_why"] = "matches only hidden elements (a collapsed menu?) — a real click cannot reach it"
+                return False
             if not ok:
                 return False
             _time.sleep(0.15); self.wait_loaded(); return True
@@ -725,7 +730,7 @@ def _rehearse(steps, limit, chars):
             except Exception as e:
                 acted = False; rec["why"] = f"error: {str(e)[:160]}"
             if not acted:
-                rec["ok"] = False; rec.setdefault("why", "target not found")
+                rec["ok"] = False; rec.setdefault("why", st.pop("_why", "target not found"))
             elif st.get("expect") and not sh.wait_for(_expect_expr(st["expect"]), st.get("timeout", 6.0)):
                 rec["ok"] = False; rec["why"] = f"expected {st['expect']!r} did not appear"
             if st.get("_text") is not None:
