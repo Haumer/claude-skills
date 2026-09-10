@@ -33,6 +33,8 @@ and SPA re-renders do not lose the overlay.
 | `press_key("Enter")` | `focus_press("Enter", label)` | narration beat, then the real key |
 | `scroll(...)` | `focus_scroll(dy, label)` | scrolls in visible steps |
 | narration | `focus_say(text, mood)` | bottom bar; mood `info`, `warn` (amber, for bugs), `ok` (green, for verified state) |
+| `wait(4)` after a click | `focus_settled()` / `focus_wait_for(selector)` | nothing; the script just continues the moment the page is ready |
+| clicking a link to see where it goes | `focus_peek(selector_or_url)` | a dashed PEEKING ring on the link; the page is read ahead without leaving |
 | `screenshot(path)` | `focus_shot(path)` | same, but the overlay is in the frame, so it doubles as evidence |
 | end of session | `focus_clear()` | overlay fades out |
 
@@ -65,6 +67,40 @@ mode it returns `None` and you decide. In "Ask me" mode the chat offers the
 candidates as buttons and it returns the viewer's index, or `None` for "you
 decide".
 
+## Peek ahead — read the next page before going there
+
+On an unknown journey most of the wall-clock goes into one-action-per-script
+round trips: click, wait, read, decide, next script. `focus_peek` collapses
+that. Give it the links you are considering and it fetches them from the
+tab's own origin (cookies included) in parallel, without navigating:
+
+```python
+pages = focus_peek(["nav a[href*=pricing]", "nav a[href*=docs]", "https://example.com/faq"],
+                   "Which of these has the price list?")
+# each: {url, status, title, text (first 1500 chars), headings, links, forms, via}
+```
+
+The viewer sees a dashed **PEEKING** ring visit each link and a "peeked
+ahead: …" line in the chat, so reading ahead is as visible as everything
+else. For JS-rendered pages the fetched HTML is thin; `mode="auto"` then
+reads the page in a hidden background tab for about a second and closes it
+(`mode="tab"` forces that). With the peeks in hand, plan the next two or
+three actions and run them in one script, each followed by
+`focus_settled()`, so the viewer sees a continuous run instead of stop-and-go.
+
+## Faster
+
+Pacing is meant for humans, but the gaps should be yours, not the tool's:
+
+- The choreography is tight by default (glide 0.45 s, click 0.24 s, read
+  ≤ 3 s); `focus_speed(2)` halves it again, and the viewer can do the same
+  from the bubble.
+- Never guess a wait. `focus_settled()` returns when the page DOM has been
+  quiet for 0.3 s; `focus_wait_for("#result")` returns the instant the
+  selector is visible. Both keep polling for Esc, messages and boxes.
+- Batch. A script is cheap; a decision is not. Peek first, then put every
+  step you are already sure about into the same script.
+
 ## The chat bubble — the viewer talks back
 
 Bottom-right is a small chat bubble (unread badge, green/amber/red status dot).
@@ -77,7 +113,8 @@ within about a third of a second:
 |---|---|
 | **Pause / Resume** | the next action blocks until Resume. While paused the page is the viewer's: they can log in, fix a form, scroll around. |
 | **Step** | lets exactly one action through, then pauses again. |
-| **Stop** (or **Esc Esc** on the page) | raises `FocusStopped`; the script ends cleanly. Single Esc is left to the page. |
+| **Stop** | raises `FocusStopped` at the next action; the overlay stays, red dot. |
+| **Esc** anywhere on the page | exit: the overlay disappears at once and the script ends with `FocusStopped` at its next action. The page is the viewer's. Only if they ask you to carry on, `focus_resume()` brings it back. In P mode Esc cancels the draft box instead, a second Esc leaves the mode. |
 | **1× / 2× / 0.5×** | changes pacing live (same as `focus_speed`). |
 | **Ask me** | manual mode: every click, keystroke, typing and navigation posts a "NEXT · CLICK …" card and waits for **Approve** or **Skip**. Skip makes the wrapper return `False` without acting. Also `focus_mode("manual")` or `FOCUS_MODE=manual`. |
 | **Message box** | raises `FocusMessage` with `.messages`. |
@@ -150,8 +187,8 @@ is unchanged.
 browser-harness < ~/.claude/skills/focus/demo.py
 ```
 
-Opens Wikipedia in a new tab, surveys three candidates, reads the intro,
-types a search, opens a result, reads its first paragraph, takes evidence
+Opens Wikipedia in a new tab, surveys three candidates, peeks at two links
+without leaving, reads the intro, types a search, opens a result, reads its first paragraph, takes evidence
 screenshots into `/tmp/focus-demo-*.png` and clears the overlay. Press P
 during the run to try annotation mode.
 

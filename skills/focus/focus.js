@@ -14,6 +14,10 @@
 //   pending(kind, label)         announce the next action (manual mode waits for Approve/Skip)
 //   poll()                       driver gate: consumes step/approve/choice, drains messages+annotations
 //   peek()                       non-consuming check: {stopped, paused, messages, annotations}
+//   peekAt(target, label, ms)    dashed ring on a link being read ahead (no click)
+//   fetchText(urls, chars)       fetch pages from the page's origin, return title/text/headings
+//   settled(quiet, timeout)      resolves when the page DOM has been quiet for `quiet` ms
+//   exit(text) / resume()        Esc hides the overlay and stops; resume() brings it back
 //   setState(patch)              restore driver-side settings after a navigation
 //   addBox(rect, note)           programmatic annotation (what the P-mode drawing does)
 //
@@ -32,7 +36,7 @@
 // The overlay lives on <html>, not <body>, so SPA re-renders don't kill it.
 // Navigations do — focus.py re-injects on every call.
 (() => {
-  const V = 5;
+  const V = 6;
   if (window.__focus && window.__focus.__v === V) return;
   const prev = window.__focus;
 
@@ -46,12 +50,13 @@
 #__fx-layer.__fx-hidden{opacity:0}
 #__fx-spot{position:absolute;left:0;top:0;width:0;height:0;border-radius:10px;
   box-shadow:0 0 0 2px #fff,0 0 0 4px ${ACCENT},0 0 0 200vmax rgba(15,23,42,.42);
-  transition:left .7s cubic-bezier(.2,.8,.2,1),top .7s cubic-bezier(.2,.8,.2,1),width .7s cubic-bezier(.2,.8,.2,1),height .7s cubic-bezier(.2,.8,.2,1),opacity .3s;opacity:0}
+  transition:left .45s cubic-bezier(.2,.8,.2,1),top .45s cubic-bezier(.2,.8,.2,1),width .45s cubic-bezier(.2,.8,.2,1),height .45s cubic-bezier(.2,.8,.2,1),opacity .3s;opacity:0}
 #__fx-spot.__fx-on{opacity:1}
 #__fx-spot.__fx-soft{box-shadow:0 0 0 2px #fff,0 0 0 4px ${ACCENT},0 0 0 200vmax rgba(15,23,42,.18)}
 #__fx-ring{position:absolute;border-radius:14px;border:2px solid ${ACCENT};opacity:0;
-  transition:left .7s cubic-bezier(.2,.8,.2,1),top .7s cubic-bezier(.2,.8,.2,1),width .7s cubic-bezier(.2,.8,.2,1),height .7s cubic-bezier(.2,.8,.2,1)}
+  transition:left .45s cubic-bezier(.2,.8,.2,1),top .45s cubic-bezier(.2,.8,.2,1),width .45s cubic-bezier(.2,.8,.2,1),height .45s cubic-bezier(.2,.8,.2,1)}
 #__fx-ring.__fx-on{animation:__fx-ring 2.8s ease-in-out infinite}
+#__fx-ring.__fx-peek{border-style:dashed;opacity:.9}
 @keyframes __fx-ring{0%,100%{opacity:0;transform:scale(1)}40%{opacity:.55;transform:scale(1.035)}}
 #__fx-pulse{position:absolute;border-radius:12px;border:2px solid ${ACCENT};opacity:0}
 #__fx-pulse.__fx-go{animation:__fx-pulse .7s ease-out 1}
@@ -59,7 +64,7 @@
 #__fx-scan{position:absolute;left:0;height:3px;border-radius:2px;opacity:0;
   background:linear-gradient(90deg,transparent,${ACCENT} 20%,${ACCENT} 80%,transparent);box-shadow:0 0 12px 2px rgba(99,102,241,.55)}
 #__fx-cursor{position:absolute;left:0;top:0;width:26px;height:30px;transform:translate(-40px,-40px);
-  transition:transform .75s cubic-bezier(.3,.9,.3,1.04);filter:drop-shadow(0 3px 6px rgba(0,0,0,.45));opacity:0}
+  transition:transform .5s cubic-bezier(.3,.9,.3,1.04);filter:drop-shadow(0 3px 6px rgba(0,0,0,.45));opacity:0}
 #__fx-cursor.__fx-on{opacity:1}
 #__fx-cursor .__fx-drift{will-change:transform}
 #__fx-cursor.__fx-idle svg{animation:__fx-breathe 2.4s ease-in-out infinite}
@@ -71,7 +76,7 @@
 @keyframes __fx-ripple{0%{opacity:.95;transform:scale(.3)}100%{opacity:0;transform:scale(1.6)}}
 #__fx-chip{position:absolute;left:0;top:0;transform:translate(-8px,-140%);white-space:nowrap;max-width:60vw;overflow:hidden;text-overflow:ellipsis;
   background:#0f172a;color:#fff;padding:6px 10px 6px 8px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.35);
-  transition:left .7s cubic-bezier(.2,.8,.2,1),top .7s cubic-bezier(.2,.8,.2,1),opacity .25s;opacity:0}
+  transition:left .45s cubic-bezier(.2,.8,.2,1),top .45s cubic-bezier(.2,.8,.2,1),opacity .25s;opacity:0}
 #__fx-chip.__fx-on{opacity:1}
 #__fx-chip .__fx-kind{display:inline-block;font-size:10px;letter-spacing:.08em;font-weight:700;color:#c7d2fe;margin-right:8px;vertical-align:1px}
 #__fx-chip .__fx-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:${ACCENT};margin:0 7px 1px 2px;box-shadow:0 0 0 3px rgba(99,102,241,.3);animation:__fx-dot 1.6s ease-in-out infinite}
@@ -159,6 +164,7 @@
   function ensure() {
     let layer = $("__fx-layer");
     if (layer && layer.isConnected) return layer;
+    if (state.stopped && state.exited) return null;   // Esc: the overlay stays gone until resume()
     const style = document.createElement("style");
     style.id = "__fx-style"; style.textContent = STYLE;
     document.documentElement.appendChild(style);
@@ -167,13 +173,13 @@
     layer.innerHTML = `<div id="__fx-spot"></div><div id="__fx-ring"></div><div id="__fx-pulse"></div><div id="__fx-scan"></div>
 <div id="__fx-chip"><span class="__fx-dot"></span><span class="__fx-kind"></span><span class="__fx-text"></span></div>
 <div id="__fx-ripple"></div><div id="__fx-cursor">${CURSOR_SVG}</div><div id="__fx-say"></div>
-<div id="__fx-draw"></div><div id="__fx-hint">Point me at things: drag boxes, type a note, Enter. Press P again to send and resume · Esc cancels a box</div>
+<div id="__fx-draw"></div><div id="__fx-hint">Point me at things: drag boxes, type a note, Enter. Press P again to send and resume · Esc cancels a box, Esc again leaves the mode</div>
 <div id="__fx-panel">
   <div class="__fx-head"><span class="__fx-hled"></span><span class="__fx-stext">agent running</span><button data-a="close" title="close">×</button></div>
   <div class="__fx-ctl"><button data-a="pause">Pause</button><button data-a="step">Step</button><button data-a="stop">Stop</button><button data-a="speed">1×</button><button data-a="ask">Ask me</button></div>
   <div class="__fx-log"></div>
   <div class="__fx-in"><input class="__fx-msg" placeholder="Message the agent…"><button class="__fx-primary" data-a="send">Send</button></div>
-  <div class="__fx-foot">P = pause and draw boxes · P again = send and resume · Esc Esc = stop</div>
+  <div class="__fx-foot">P = pause and draw boxes · P again = send and resume · Esc = stop and hide</div>
 </div>
 <div id="__fx-bubble">${CHAT_SVG}<span id="__fx-led"></span><span id="__fx-badge"></span></div>`;
     document.documentElement.appendChild(layer);
@@ -270,19 +276,19 @@
     const t = resolve(target); if (!t) return null;
     await bringIntoView(t);
     const r = rectOf(t), p = place(r, kind, label);
-    await sleep(720);
+    await sleep(480);
     $("__fx-cursor").classList.add("__fx-idle");
     touch();
     return { ...r, ...p };
   }
-  async function read(target, label, ms = 1600) {
+  async function read(target, label, ms = 1200) {
     const t = resolve(target); if (!t) return null;
     await bringIntoView(t);
     const r = rectOf(t);
     place(r, "READING", label);
     $("__fx-cursor").style.transform = `translate(${r.x - 14}px,${r.y - 10}px)`;
     life.anchor = { x: r.x - 14, y: r.y - 10 };
-    await sleep(500);
+    await sleep(300);
     const scan = $("__fx-scan");
     Object.assign(scan.style, { left: r.x + 4 + "px", width: r.w - 8 + "px", top: r.y + "px", opacity: "1", transition: "none" });
     await sleep(20);
@@ -299,7 +305,7 @@
     Object.assign(rip.style, { left: r.cx + 4 + "px", top: r.cy + 2 + "px" });
     Object.assign(pulse.style, { left: r.x - 2 + "px", top: r.y - 2 + "px", width: r.w + "px", height: r.h + "px" });
     cur.classList.remove("__fx-idle"); cur.classList.add("__fx-press"); rip.classList.add("__fx-go"); pulse.classList.add("__fx-go");
-    await sleep(320);
+    await sleep(240);
     cur.classList.remove("__fx-press"); rip.classList.remove("__fx-go"); pulse.classList.remove("__fx-go");
     cur.classList.add("__fx-idle");
     touch();
@@ -335,9 +341,55 @@
     return out;
   }
 
+  // Peek: show which link is being read ahead (dashed ring, soft spotlight), nothing is clicked.
+  async function peekAt(target, label, ms = 300) {
+    const t = resolve(target); if (!t) return null;
+    await bringIntoView(t);
+    const r = rectOf(t);
+    place(r, "PEEKING", label || "reading ahead", true);
+    $("__fx-ring").classList.add("__fx-peek");
+    await sleep(ms);
+    $("__fx-ring").classList.remove("__fx-peek"); $("__fx-spot").classList.remove("__fx-soft");
+    $("__fx-cursor").classList.add("__fx-idle");
+    touch();
+    return r;
+  }
+  // Fetch pages in parallel from the page's own origin (cookies included) and reduce them to text.
+  function fetchText(urls, chars = 1500) {
+    return Promise.all(urls.map(async (u) => {
+      try {
+        const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 8000);
+        const res = await fetch(u, { credentials: "include", signal: ctl.signal, headers: { Accept: "text/html,*/*" } });
+        clearTimeout(to);
+        const ct = res.headers.get("content-type") || "", body = await res.text();
+        if (!/html/i.test(ct)) return { url: u, status: res.status, type: ct, title: "", text: body.slice(0, chars), headings: [], links: 0, forms: 0 };
+        const doc = new DOMParser().parseFromString(body, "text/html");
+        doc.querySelectorAll("script,style,noscript,svg,template").forEach((e) => e.remove());
+        const txt = (doc.body ? doc.body.textContent : "").replace(/\s+/g, " ").trim();
+        return { url: u, status: res.status, type: ct, title: (doc.title || "").trim(), text: txt.slice(0, chars),
+                 headings: [...doc.querySelectorAll("h1,h2,h3")].map((h) => h.textContent.replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 20),
+                 links: doc.querySelectorAll("a[href]").length, forms: doc.querySelectorAll("form").length };
+      } catch (e) { return { url: u, error: String(e) }; }
+    }));
+  }
+  // Resolve when the page's DOM (not the overlay) has been quiet for `quiet` ms, or after `timeout` ms.
+  function settled(quiet = 300, timeout = 8000) {
+    return new Promise((res) => {
+      const start = Date.now(); let last = start;
+      const ours = (n) => { const el = n.nodeType === 1 ? n : n.parentElement; return !!(el && el.closest && el.closest("#__fx-layer")); };
+      const mo = new MutationObserver((recs) => { if (recs.some((r) => !ours(r.target))) last = Date.now(); });
+      mo.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+      const iv = setInterval(() => {
+        const now = Date.now();
+        if (now - last >= quiet || now - start >= timeout) { clearInterval(iv); mo.disconnect(); res({ ms: now - start, quiet: now - last >= quiet }); }
+      }, 50);
+    });
+  }
+  function note(text) { push({ who: "sys", text }); return true; }
+
   function say(text, mood = "info") {
     ensure(); touch();
-    const s = $("__fx-say");
+    const s = $("__fx-say"); if (!s) return false;
     s.textContent = text || "";
     s.classList.toggle("__fx-warn", mood === "warn"); s.classList.toggle("__fx-ok", mood === "ok");
     s.classList.toggle("__fx-on", !!text);
@@ -428,13 +480,23 @@
     if (el.closest && el.closest("#__fx-layer")) return !!el.closest("input,textarea");
     return el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
   }
-  let lastEsc = 0;
+  function exit(text) {
+    state.stopped = true; state.exited = true; state.paused = false; state.step = false; state.annotating = false;
+    document.querySelectorAll(".__fx-box").forEach((b) => b.remove()); state.boxes = [];
+    push({ who: "sys", text: text || "Esc — stopped by the viewer" });
+    clear(220);
+  }
+  function resume() { state.stopped = false; state.exited = false; ensure(); render(); return true; }
   function onKey(e) {
     if (e.key === "Escape") {
-      if (state.annotating) { const d = state.boxes.find((b) => !b.done); if (d) { d.el.remove(); state.boxes = state.boxes.filter((b) => b !== d); } return; }
-      const now = Date.now();                      // double-Esc within 600 ms = Stop (single Esc is left to the page)
-      if (now - lastEsc < 600) { state.stopped = true; push({ who: "sys", text: "Esc Esc — stopping at the next action" }); render(); lastEsc = 0; }
-      else lastEsc = now;
+      if (state.annotating) {                           // in P mode Esc cancels the draft box, then leaves the mode
+        const d = state.boxes.find((b) => !b.done);
+        if (d) { d.el.remove(); state.boxes = state.boxes.filter((b) => b !== d); } else toggleAnnotate();
+        return;
+      }
+      if (e.target && e.target.closest && e.target.closest("#__fx-panel")) { state.open = false; render(); return; }
+      e.preventDefault(); e.stopPropagation();
+      exit("Esc — stopped by the viewer; overlay hidden, the page is yours");
       return;
     }
     if ((e.key === "p" || e.key === "P") && !e.metaKey && !e.ctrlKey && !e.altKey && !editable(e.target)) {
@@ -568,6 +630,7 @@
   // ---------------------------------------------------------------- driver API
   function pending(kind, label) {
     ensure(); touch();
+    if (!$("__fx-layer")) return false;
     state.pending = { kind, label: label || "" }; state.approve = null;
     if (state.mode === "manual") push({ type: "pending", kind, label: label || "" });
     render();
@@ -591,5 +654,5 @@
   }
   function setState(patch) { Object.assign(state, patch || {}); render(); return true; }
 
-  window.__focus = { __v: V, state, ensure, look, read, act, typing, doneTyping, survey, say, ack, clear, rect, pending, poll, peek, setState, addBox, toggleAnnotate };
+  window.__focus = { __v: V, state, ensure, look, read, act, typing, doneTyping, survey, say, ack, clear, rect, pending, poll, peek, setState, addBox, toggleAnnotate, peekAt, fetchText, settled, note, exit, resume };
 })();

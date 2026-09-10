@@ -39,7 +39,8 @@ _STATE = {"mode": _os.environ.get("FOCUS_MODE", "auto"), "speed": _SPEED}
 class FocusStopped(Exception):
     """The viewer pressed Stop in the dock."""
     def __str__(self):
-        return "FOCUS: viewer pressed Stop — the session ended at the next action."
+        return ("FOCUS: the viewer pressed Esc/Stop — this run ended at the next action. "
+                "Report where things stand; only if they ask you to carry on, call focus_resume() in the next script.")
 
 
 class FocusMessage(Exception):
@@ -173,7 +174,7 @@ def _target(t):
 
 def focus_install():
     """Inject the overlay engine if this document doesn't have it yet. Safe to call often."""
-    if js("!!(window.__focus && window.__focus.__v === 5)"):
+    if js("!!(window.__focus && window.__focus.__v === 6)"):
         return True
     js(_FOCUS_JS)
     _push_state()
@@ -192,7 +193,7 @@ def focus_say(text, mood="info"):
     return text
 
 
-def focus_look(target, label="", hold=0.8):
+def focus_look(target, label="", hold=0.5):
     """Spotlight a region and glide the cursor to it. Returns its viewport rect or None."""
     _gate("LOOK", label or str(target), approval=False)
     r = _call("look", target, label)
@@ -211,13 +212,13 @@ def focus_read(target, label="", seconds=None):
         return None
     if seconds is None:
         words = len((text or "").split())
-        seconds = min(4.0, max(1.2, words / 60.0))
+        seconds = min(3.0, max(0.9, words / 70.0))
     ms = int(seconds * 1000 / _SPEED) if _SPEED > 0 else 200
     _call("read", target, label, f", {ms}")
     return text
 
 
-def focus_survey(candidates, question="", dwell=1.0):
+def focus_survey(candidates, question="", dwell=0.7):
     """Show the options being weighed before committing to one.
 
     candidates: list of (selector, label) tuples or {"target","label"} dicts.
@@ -251,7 +252,7 @@ def focus_ack(text):
     return text
 
 
-def focus_click(target, label="", settle=0.5, _gated=False):
+def focus_click(target, label="", settle=0.3, _gated=False):
     """Announce, glide, ripple, then really click the element's centre. Returns True if clicked."""
     if not _gated and not _gate("CLICK", label or str(target)):
         return False
@@ -264,7 +265,7 @@ def focus_click(target, label="", settle=0.5, _gated=False):
     return True
 
 
-def focus_click_at(x, y, label="", settle=0.5):
+def focus_click_at(x, y, label="", settle=0.3):
     """Coordinate click with the same choreography (for canvas UIs)."""
     return focus_click((x, y), label, settle)
 
@@ -285,7 +286,7 @@ def focus_type(target, text, label="", per_char=0.035, max_seconds=2.5):
         if delay:
             _time.sleep(delay)
     js("window.__focus.doneTyping()")
-    _pause(0.3)
+    _pause(0.2)
     return True
 
 
@@ -296,7 +297,7 @@ def focus_press(key, label=""):
     if label:
         focus_say(label)
     press_key(key)
-    _pause(0.3)
+    _pause(0.2)
 
 
 def focus_goto(url, label=None, timeout=15.0):
@@ -304,7 +305,7 @@ def focus_goto(url, label=None, timeout=15.0):
     if not _gate("NAVIGATE", label or url):
         return None
     focus_say(label or f"Opening {url}")
-    _pause(0.5)
+    _pause(0.3)
     goto(url)
     wait_for_load(timeout)
     focus_install()
@@ -319,7 +320,7 @@ def focus_new_tab(url, label=None, timeout=15.0):
     wait_for_load(timeout)
     focus_install()
     focus_say(label or f"Opened {url}")
-    _pause(0.5)
+    _pause(0.3)
     return page_info()
 
 
@@ -340,6 +341,114 @@ def focus_shot(path="/tmp/focus-shot.png", settle=0.45):
     Waits for the overlay transitions (≤ 0.6 s) to finish first."""
     _pause(settle)
     return screenshot(path)
+
+
+def focus_wait_for(cond, timeout=10.0, label=""):
+    """Block until `cond` holds, polling every 0.15 s (interrupts still land).
+
+    cond: a CSS selector (waits until it matches a visible element) or a
+    JS expression prefixed with "js:" that must evaluate truthy. Returns True
+    when it held, False on timeout — so scripts never need a fixed wait(4)."""
+    expr = cond[3:] if cond.startswith("js:") else f"(e=>!!(e&&(e.offsetParent||e.getClientRects().length)))(document.querySelector({_q(cond)}))"
+    end = _time.time() + timeout
+    while True:
+        _check()
+        try:
+            if js(expr):
+                return True
+        except Exception:
+            pass
+        if _time.time() >= end:
+            if label:
+                focus_say(f"Still waiting for: {label}", "warn")
+            return False
+        _time.sleep(0.15)
+
+
+def focus_settled(quiet=0.3, timeout=8.0):
+    """Return once the page's DOM has been quiet for `quiet` s (the overlay's own
+    motion is ignored) or after `timeout` s. Use after a click that re-renders
+    instead of guessing a wait()."""
+    focus_install()
+    r = js(f"window.__focus.settled({int(quiet * 1000)}, {int(timeout * 1000)})")
+    _check()
+    return r
+
+
+def focus_resume():
+    """Bring the overlay back after the viewer pressed Esc (or Stop). Only when they asked to continue."""
+    focus_install()
+    js("window.__focus && window.__focus.resume()")
+    _push_state()
+    return True
+
+
+def _peek_tab(url, chars=1500, timeout=10.0):
+    """Read a page in a background tab (for JS-rendered pages the fetch cannot see). Closes it afterwards."""
+    tid = cdp("Target.createTarget", url=url, background=True)["targetId"]
+    sid = cdp("Target.attachToTarget", targetId=tid, flatten=True)["sessionId"]
+    ev = lambda expr: cdp("Runtime.evaluate", session_id=sid, expression=expr, returnByValue=True).get("result", {}).get("value")
+    end = _time.time() + timeout
+    while _time.time() < end and ev("document.readyState") != "complete":
+        _time.sleep(0.2)
+    _time.sleep(0.7)                                   # let a SPA paint
+    val = ev("JSON.stringify({url:location.href,title:document.title,text:(document.body?document.body.innerText:'').replace(/\\s+/g,' ').trim().slice(0,%d),"
+             "headings:[...document.querySelectorAll('h1,h2,h3')].map(h=>h.innerText.trim()).filter(Boolean).slice(0,20),"
+             "links:document.querySelectorAll('a[href]').length,forms:document.querySelectorAll('form').length})" % chars)
+    try:
+        cdp("Target.closeTarget", targetId=tid)
+    except Exception:
+        pass
+    d = _json.loads(val) if val else {"url": url, "error": "no result"}
+    d["via"] = "tab"
+    return d
+
+
+def focus_peek(targets, label="", chars=1500, mode="auto"):
+    """Sneak a look at where links lead WITHOUT navigating, so the next steps can be planned in one go.
+
+    targets: a selector, a URL, or a list of them. Selectors resolve to the
+    link under (or around) the element. Each page is fetched from the tab's own
+    origin (cookies included) and reduced to {url, status, title, text, headings,
+    links, forms}. mode "auto" falls back to a hidden background tab when the
+    fetched HTML is thin (JS-rendered), "fetch" never does, "tab" always does.
+    The viewer sees a dashed PEEKING ring on each link; nothing is clicked.
+    Returns one dict for a single target, else a list (None where a target had no link)."""
+    single = isinstance(targets, str)
+    items = [targets] if single else list(targets)
+    _gate("PEEK", label or f"{len(items)} page{'s' if len(items) != 1 else ''} ahead", approval=False)
+    urls = []
+    for t in items:
+        if t.startswith(("http://", "https://")):
+            urls.append(t); continue
+        href = js(f"(e=>{{if(!e)return null;const a=e.closest?e.closest('a[href]'):null;return (a&&a.href)||e.href||null}})(document.querySelector({_q(t)}))")
+        if not href:
+            focus_say(f"Could not peek: no link at {label or t}", "warn")
+            urls.append(None); continue
+        js(f"window.__focus.peekAt({_q(t)}, {_q(label or 'reading ahead')}, {int(300 / _SPEED) if _SPEED > 0 else 80})")
+        urls.append(href)
+    live = [u for u in urls if u]
+    fetched = {}
+    if live and mode in ("auto", "fetch"):
+        for u, r in zip(live, js(f"window.__focus.fetchText({_q(live)}, {int(chars)})") or []):
+            fetched[u] = dict(r, via="fetch")
+    out = []
+    for u in urls:
+        if not u:
+            out.append(None); continue
+        r = fetched.get(u)
+        thin = (not r) or r.get("error") or len(r.get("text") or "") < 200
+        if mode == "tab" or (mode == "auto" and thin):
+            try:
+                r = _peek_tab(u, chars)
+            except Exception as e:                       # keep whatever the fetch gave us
+                r = r or {"url": u, "error": str(e), "via": "tab"}
+        out.append(r)
+        _check()
+    if js("!!(window.__focus && window.__focus.note)"):
+        got = [f"{(r.get('title') or r.get('url') or '?')[:50]} ({len(r.get('text') or '')} chars)" for r in out if r]
+        js(f"window.__focus.note({_q('peeked ahead: ' + '; '.join(got))})")
+    return out[0] if single else out
 
 
 def focus_clear():
