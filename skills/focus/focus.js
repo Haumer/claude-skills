@@ -273,7 +273,10 @@
     for (const e of document.querySelectorAll("a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],[role=menuitem]")) {
       if (e.closest("#__fx-layer")) continue;
       const r = e.getBoundingClientRect();
-      if (r.width < 24 || r.height < 12 || r.bottom < 8 || r.top > innerHeight - 8 || r.right < 8 || r.left > innerWidth - 8) continue;
+      if (r.width < 24 || r.height < 12 || r.width > 520 || r.height > 160 || r.bottom < 8 || r.top > innerHeight - 8 || r.right < 8 || r.left > innerWidth - 8) continue;
+      const st = getComputedStyle(e); if (st.visibility === "hidden" || +st.opacity < 0.2) continue;
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);   // really visible, not behind or collapsed
+      if (!hit || !(hit === e || e.contains(hit) || hit.contains(e))) continue;
       out.push({ el: e, r }); if (out.length > 200) break;
     }
     return out;
