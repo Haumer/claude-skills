@@ -13,11 +13,14 @@
 # Speed: set FOCUS_SPEED (float, default 1.0; 2.0 = twice as fast, 0.5 = slower)
 # or call focus_speed(x). Set FOCUS_SPEED=0 to skip all pauses (overlay still shows).
 #
-# Interactive: the overlay's dock lets the viewer pause/resume, step, stop,
-# change speed, switch to "ask me" mode (Approve/Skip per action) and send a
-# message. Every wrapper passes through _gate() first, which honours those.
-# Stop raises FocusStopped; a message raises FocusMessage (read it, answer,
-# continue with a new script — the dock state lives in the tab).
+# Interactive: the overlay's chat bubble lets the viewer pause/resume, step,
+# stop, change speed, switch to "ask me" mode (Approve/Skip per action) and
+# send messages. Pressing P on the page pauses and lets them draw annotated
+# boxes; P again sends them. Every wrapper passes through _gate() first and
+# every pause polls for interrupts, so those arrive within ~0.3 s.
+# Stop raises FocusStopped; a message raises FocusMessage; boxes raise
+# FocusAnnotations (read it, answer with focus_ack, continue with a new
+# script — the chat state lives in the tab).
 #
 # The harness runs driver scripts through a nested exec(), where names defined
 # at the top level land in a locals dict that function bodies cannot see. The
@@ -40,12 +43,54 @@ class FocusStopped(Exception):
 
 
 class FocusMessage(Exception):
-    """The viewer sent a message from the dock. .messages is the list of strings."""
+    """The viewer sent a message from the chat. .messages is the list of strings."""
     def __init__(self, messages):
         super().__init__(messages)
         self.messages = list(messages)
     def __str__(self):
-        return "FOCUS: viewer says: " + " | ".join(self.messages) + "  (answer them with focus_say, then continue with a new script)"
+        return "FOCUS: viewer says: " + " | ".join(self.messages) + "  (answer with focus_say, then continue with a new script)"
+
+
+class FocusAnnotations(Exception):
+    """The viewer drew boxes on the page (P mode). .boxes is a list of dicts:
+    n, note, rect{x,y,w,h} (viewport), page{x,y}, element{tag,id,classes,selector,text}, text (what is inside the box).
+    .screenshot is a PNG with the boxes drawn, taken the moment they arrived."""
+    def __init__(self, boxes, screenshot=None):
+        super().__init__(boxes)
+        self.boxes = list(boxes)
+        self.screenshot = screenshot
+    def __str__(self):
+        lines = ["FOCUS: viewer drew %d box%s on %s — look at the screenshot %s, answer with focus_ack(text), then continue with a new script"
+                 % (len(self.boxes), "" if len(self.boxes) == 1 else "es", js("location.href") or "the page", self.screenshot or "(none)")]
+        for b in self.boxes:
+            el = b.get("element") or {}
+            lines.append("  #%s note=%r rect=%s element=<%s%s%s> selector=%r text=%r region_text=%r" % (
+                b.get("n"), b.get("note", ""), b.get("rect"),
+                el.get("tag", "?"), ("#" + el["id"]) if el.get("id") else "",
+                ("." + ".".join(el["classes"])) if el.get("classes") else "",
+                el.get("selector"), (el.get("text") or "")[:120], (b.get("text") or "")[:200]))
+        return "\n".join(lines)
+
+
+def _raise_for(st):
+    """Turn a polled state into the matching interrupt, if any."""
+    if st.get("stopped"):
+        raise FocusStopped()
+    if st.get("annotations"):
+        shot = screenshot("/tmp/focus-annotations.png")
+        raise FocusAnnotations(st["annotations"], shot)
+    if st.get("messages"):
+        raise FocusMessage(st["messages"])
+
+
+def _check():
+    """Cheap interrupt check used inside every pause; consumes only interrupts."""
+    raw = js("window.__focus && window.__focus.peek()")
+    if not raw:
+        return
+    pk = _json.loads(raw)
+    if pk.get("stopped") or pk.get("messages") or pk.get("annotations"):
+        _raise_for(_json.loads(js("window.__focus.poll()")))
 
 
 def _push_state():
@@ -85,10 +130,7 @@ def _gate(kind, label, approval=True):
         if st.get("speed") not in (None, _SPEED):
             _SPEED = float(st["speed"]); _STATE["speed"] = _SPEED
         _STATE["mode"] = st.get("mode", _STATE["mode"])
-        if st.get("stopped"):
-            raise FocusStopped()
-        if st.get("messages"):
-            raise FocusMessage(st["messages"])
+        _raise_for(st)
         if approval and _STATE["mode"] == "manual":
             if st.get("approve") == "yes":
                 return True
@@ -103,8 +145,17 @@ def _gate(kind, label, approval=True):
 
 
 def _pause(seconds):
-    if _SPEED > 0:
-        _time.sleep(seconds / _SPEED)
+    """Sleep in slices, polling the chat so Stop / messages / boxes interrupt within ~0.3 s."""
+    if _SPEED <= 0:
+        _check()
+        return
+    end = _time.time() + seconds / _SPEED
+    while True:
+        _check()
+        left = end - _time.time()
+        if left <= 0:
+            return
+        _time.sleep(min(0.3, left))
 
 
 def _q(x):
@@ -122,7 +173,7 @@ def _target(t):
 
 def focus_install():
     """Inject the overlay engine if this document doesn't have it yet. Safe to call often."""
-    if js("!!(window.__focus && window.__focus.__v === 4)"):
+    if js("!!(window.__focus && window.__focus.__v === 5)"):
         return True
     js(_FOCUS_JS)
     _push_state()
@@ -160,9 +211,43 @@ def focus_read(target, label="", seconds=None):
         return None
     if seconds is None:
         words = len((text or "").split())
-        seconds = min(6.0, max(1.2, words / 60.0))
+        seconds = min(4.0, max(1.2, words / 60.0))
     ms = int(seconds * 1000 / _SPEED) if _SPEED > 0 else 200
     _call("read", target, label, f", {ms}")
+    return text
+
+
+def focus_survey(candidates, question="", dwell=1.0):
+    """Show the options being weighed before committing to one.
+
+    candidates: list of (selector, label) tuples or {"target","label"} dicts.
+    The cursor visits each one with a "CANDIDATE i/N" chip. In manual mode the
+    chat offers them as buttons and this returns the viewer's index (or None
+    for "you decide"); in auto mode it returns None and the agent decides."""
+    _gate("SURVEY", question or f"{len(candidates)} candidates", approval=False)
+    items = [c if isinstance(c, dict) else {"target": c[0], "label": c[1] if len(c) > 1 else str(c[0])} for c in candidates]
+    if question:
+        focus_say(question)
+    ms = int(dwell * 1000 / _SPEED) if _SPEED > 0 else 150
+    js(f"window.__focus.survey({_q(items)}, {ms})")
+    if _STATE["mode"] != "manual":
+        return None
+    while True:                      # wait for the viewer's pick
+        raw = js("window.__focus && window.__focus.poll()")
+        if not raw:
+            _time.sleep(0.3); focus_install(); continue
+        st = _json.loads(raw)
+        _raise_for(st)
+        ch = st.get("choice")
+        if ch is not None:
+            return None if ch < 0 else ch
+        _time.sleep(0.25)
+
+
+def focus_ack(text):
+    """Reply to the viewer's boxes (green bar + chat) and clear them from the page."""
+    focus_install()
+    js(f"window.__focus.ack({_q(text)})")
     return text
 
 

@@ -40,33 +40,77 @@ Targets are CSS selectors or `(x, y)` viewport coordinates for canvas UIs.
 Every wrapper returns the same thing the raw helper would, plus the target
 rect where useful.
 
-## The dock — the viewer talks back
+## Always in motion
 
-Bottom-right of the page is a small control dock, the only part of the overlay
-that accepts clicks. Every wrapper passes through a gate that honours it:
+The overlay never freezes, even while the driver is between scripts: the
+cursor drifts gently around its target, the ring around the target breathes,
+and after about two seconds without a call the chip switches to
+"THINKING · deciding the next step" until the next action lands. The viewer
+can always tell the difference between "the agent is thinking" and "the agent
+is stuck".
+
+## Survey — show the options before choosing
+
+When you are weighing candidates (which button is checkout, which link is the
+pricing page), do not just click one. Call
+
+```python
+pick = focus_survey([("#a", "Buy now"), ("nav a[href*=pricing]", "Pricing link"), ("#cta", "Start trial")],
+                    "Which of these leads to the price?")
+```
+
+The cursor visits each candidate with a "CANDIDATE 2/3" chip and a soft
+spotlight, so the viewer sees the assessment, not only the verdict. In auto
+mode it returns `None` and you decide. In "Ask me" mode the chat offers the
+candidates as buttons and it returns the viewer's index, or `None` for "you
+decide".
+
+## The chat bubble — the viewer talks back
+
+Bottom-right is a small chat bubble (unread badge, green/amber/red status dot).
+It opens a compact panel: the transcript of everything you said with
+`focus_say`, the viewer's messages, and the controls. Every wrapper passes
+through a gate that honours them, and every pause polls, so interrupts land
+within about a third of a second:
 
 | Control | Effect on the driver |
 |---|---|
 | **Pause / Resume** | the next action blocks until Resume. While paused the page is the viewer's: they can log in, fix a form, scroll around. |
 | **Step** | lets exactly one action through, then pauses again. |
-| **Stop** | the next action raises `FocusStopped`; the script ends cleanly. |
+| **Stop** | raises `FocusStopped`; the script ends cleanly. |
 | **1× / 2× / 0.5×** | changes pacing live (same as `focus_speed`). |
-| **Ask me** | manual mode: every click, keystroke, typing and navigation shows "NEXT: CLICK …" and waits for **Approve** or **Skip**. Skip makes the wrapper return `False` without acting. Also settable with `focus_mode("manual")`. |
-| **Message box** | the text is queued; the next action raises `FocusMessage` with `.messages`. |
+| **Ask me** | manual mode: every click, keystroke, typing and navigation posts a "NEXT · CLICK …" card and waits for **Approve** or **Skip**. Skip makes the wrapper return `False` without acting. Also `focus_mode("manual")` or `FOCUS_MODE=manual`. |
+| **Message box** | raises `FocusMessage` with `.messages`. |
 
-Looking and reading are never gated for approval, only for pause/stop/messages,
-so the agent can keep observing while the viewer decides.
+## P — the viewer points at things
 
-**Protocol for `FocusMessage` and `FocusStopped`.** A driver script is one
-`browser-harness` run, so an interrupt ends that run with the exception text
-in the output ("FOCUS: viewer says: …"). Read it, answer with `focus_say`, and
-continue with a new script. Dock state (mode, speed, paused) lives in the tab
-and is restored after navigations, so nothing is lost between scripts. After a
-pause or takeover, re-assert the page (URL + a selector) before continuing:
-the viewer may have moved.
+Pressing **P** anywhere on the page (outside a text field) pauses the agent
+and enters annotation mode: an amber hint appears, the cursor becomes a
+crosshair, and the viewer drags boxes over anything they want you to look at,
+typing a short note per box (Enter commits, Esc cancels). Pressing **P** again
+sends the boxes and resumes.
 
-Set `FOCUS_MODE=manual` in the environment to start every session in
-approval mode.
+On the driver side the boxes arrive as `FocusAnnotations`, raised at the next
+gate or pause, with:
+
+- `.boxes`: one dict per box with `n`, `note`, `rect` (viewport), `page`
+  (document coordinates), `element` (tag, id, classes, a CSS selector, its
+  text) for the element under the box centre, and `text`, the visible text
+  inside the box;
+- `.screenshot`: a PNG taken the moment they arrived, boxes and notes drawn.
+
+The boxes stay on the page, dashed, until you answer with
+`focus_ack("…")`, which posts a green reply and removes them.
+
+**Protocol for interrupts.** A driver script is one `browser-harness` run, so
+`FocusMessage`, `FocusAnnotations` and `FocusStopped` end that run with a
+readable "FOCUS: …" line in the output. Read it (open the screenshot for
+boxes), answer with `focus_say` or `focus_ack`, and continue with a new
+script. Chat state, mode and speed live in the tab and survive navigations,
+so nothing is lost between scripts. After a pause or takeover, re-assert the
+page (URL plus a selector) before continuing: the viewer may have moved.
+No sub-agent is needed: the interrupt lands in your main loop, which is
+exactly where the next decision is made.
 
 ## Rules
 
@@ -106,13 +150,15 @@ is unchanged.
 browser-harness < ~/.claude/skills/focus/demo.py
 ```
 
-Opens Wikipedia in a new tab, reads the intro, types a search, opens a result,
-reads its first paragraph, takes evidence screenshots into `/tmp/focus-demo-*.png`
-and clears the overlay.
+Opens Wikipedia in a new tab, surveys three candidates, reads the intro,
+types a search, opens a result, reads its first paragraph, takes evidence
+screenshots into `/tmp/focus-demo-*.png` and clears the overlay. Press P
+during the run to try annotation mode.
 
 ## Extending
 
-`focus.js` is plain DOM and CSS. Colour is one constant (`ACCENT`). New
+`focus.js` is plain DOM and CSS. Colours are two constants (`ACCENT` for the
+agent, `HUMAN` for the viewer's marks). New
 choreography goes in as another `window.__focus.<verb>` returning a Promise;
 mirror it with a `focus_<verb>` wrapper in `focus.py`. Keep animations under
 700 ms and everything `pointer-events: none`, so the overlay can never eat a
