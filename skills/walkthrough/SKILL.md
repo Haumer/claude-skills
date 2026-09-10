@@ -34,6 +34,21 @@ Named persona → use the project's fast-login mechanism from NOTES.md.
 
 ## 2. Annotation bar
 
+**Preferred: the `focus` skill.** If `~/.claude/skills/focus/focus.py` exists,
+load it at the top of every driver script and use `focus_say` for narration and
+`focus_click` / `focus_type` / `focus_read` / `focus_look` for the actions —
+the viewer then sees a cursor glide to each element, a spotlight on it, a chip
+naming the action, and a scan line over anything you read. Bugs use
+`focus_say(..., "warn")`. Only fall back to the bar snippet below when `focus`
+is not installed.
+
+```python
+import os
+exec(open(os.path.expanduser("~/.claude/skills/focus/focus.py")).read())
+```
+
+**Fallback: the bare bar.**
+
 Inject after every navigation (navigations destroy it). Two gotchas baked
 into this snippet: build the JS with `.replace(...)` + `json.dumps` — Python
 `%`-formatting explodes on CSS percent signs — and define everything INSIDE

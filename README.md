@@ -6,7 +6,8 @@ Claude Code skills and slash commands I wrote and use daily. Opinionated, small,
 |---|---|---|
 | [**deep-research**](skills/deep-research/SKILL.md) | "research Almdudler" → fans out parallel sub-agents over the browser and the web, enforces a source-everything JSON contract, renders a ≤ 4-page Typst PDF brief: TL;DR, fact grid, insights, people, digital footprint, timeline, sources. | typst, python3, browser-harness, design-document |
 | [**design-document**](skills/design-document/SKILL.md) | Papers, reports, memos and letters as APA7-typeset PDFs via Typst. Charts follow APA7 and cite their data. Every document gets a global ID and lands in a per-project `documents.md`. | typst, python3, matplotlib (charts only) |
-| [**walkthrough**](skills/walkthrough/SKILL.md) | Annotated live product tour in your own browser: impersonate a fresh user, drive a journey step by step with an on-screen narration bar, verify state outside the UI after every step, log every bug hit. | browser-harness |
+| [**focus**](skills/focus/SKILL.md) | Makes the agent's attention visible while it drives browser-harness: a cursor glides to the element about to be used, a spotlight dims the rest, a scan line sweeps text being read, a chip names the action and a narration bar says why. Every click and keystroke is still real. `walkthrough` uses it. | browser-harness |
+| [**walkthrough**](skills/walkthrough/SKILL.md) | Annotated live product tour in your own browser: impersonate a fresh user, drive a journey step by step, verify state outside the UI after every step, log every bug hit. | browser-harness, focus |
 | [**gemini**](skills/gemini/SKILL.md) | Gemini from the shell with plain curl: image generation and editing with reference-image composition, text prompts, key lookup, base64 output decoding. | curl, jq, `GEMINI_API_KEY` |
 | [**/branchit**](commands/branchit.md) | New branch + git worktree from the latest pushed default branch, with a dirty-tree check that ignores scratch files but stops on real changes. | git, gh (optional) |
 | [**/shipit**](commands/shipit.md) | Ship a feature branch: merge main in, run tests, look for lost work, merge, push, deploy (kamal / fly / heroku / CI), smoke-test prod, clean up. | git, gh, your deploy CLI |
@@ -55,6 +56,7 @@ There are no npm dependencies. The skills are Markdown, Typst templates and two 
 - `design-document` owns the document tracker (`helpers/track_document.py`). It allocates global IDs (`D0001`, `D0002`, …) from `~/.claude/ostack/state.json`, appends to the project's `documents.md` and to `~/.claude/ostack/index.md`. `deep-research` reuses it, so install both.
 - `deep-research` templates live in `skills/deep-research/templates/`: `brief.typ` is the styling (serif body, one oxblood accent, tables not prose), `brief-skeleton.typ` is what gets copied and filled.
 - `design-document` templates are `apa7.typ` (shared base) plus `apa7-paper`, `apa7-report`, `apa7-memo`, `apa7-letter`. A rendered example is in `skills/design-document/examples/`.
+- `focus` is two files: `focus.js` (the overlay, injected into the page) and `focus.py` (wrappers that animate first, then perform the real CDP action at the same pixel). `browser-harness < skills/focus/demo.py` shows it on Wikipedia.
 - `walkthrough` expects a `walkthroughs/NOTES.md` at your repo root (dev URL, fast login, dialog framework, personas). It creates one on the first run and writes a replayable record per run to `walkthroughs/<date>-<journey>.md`.
 - `/wt` is a one-line command that invokes the `walkthrough` skill with its arguments.
 
